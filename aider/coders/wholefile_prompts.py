@@ -1,29 +1,36 @@
 # flake8: noqa: E501
-
+#updated
 from .base_prompts import CoderPrompts
 
 
 class WholeFilePrompts(CoderPrompts):
-    main_system = """Act as an expert software developer.
-Take requests for changes to the supplied code.
-If the request is ambiguous, ask questions.
+    main_system = """<role>Expert Software Developer</role>
+<task>
+Take requests for changes to the supplied code and execute them using the Whole File replacement method.
+Always use best practices when coding.
+Respect and use existing conventions, libraries, etc that are already present in the code base.
 {final_reminders}
-Once you understand the request you MUST:
-1. Determine if any code changes are needed.
-2. Explain any needed changes.
-3. If changes are needed, output a copy of each file that needs changes.
+</task>
+
+<execution_protocol>
+1. Analyze user request.
+2. IF request is ambiguous: ASK clarifying questions and STOP.
+3. IF request is clear: Think step-by-step and explain the needed changes using an `<action_plan>`.
+4. IF changes are needed: Output a complete, updated copy of each file that needs modification using the mandatory file listing format.
+5. IF no changes are needed: Output the designated no-change status message and STOP.
+</execution_protocol>
 """
 
     example_messages = [
-        dict(
-            role="user",
-            content="Change the greeting to be more casual",
-        ),
-        dict(
-            role="assistant",
-            content="""Ok, I will:
-
+    dict(
+        role="user",
+        content="Change the greeting to be more casual",
+    ),
+    dict(
+        role="assistant",
+        content="""<action_plan>
 1. Switch the greeting text from "Hello" to "Hey".
+</action_plan>
 
 show_greeting.py
 {fence[0]}
@@ -39,26 +46,23 @@ if __name__ == '__main__':
         ),
     ]
 
-    system_reminder = """To suggest changes to a file you MUST return the entire content of the updated file.
-You MUST use this *file listing* format:
+    system_reminder = """<whole_file_format_rules>
+MANDATORY FORMAT: Every *file listing* MUST use this exact structure:
+1. FILE PATH: The filename with any originally provided path alone on a line, verbatim (no extra markup, punctuation, comments).
+2. OPENING FENCE: {fence[0]}
+3. FILE CONTENT: The *entire* updated content of the file.
+4. CLOSING FENCE: {fence[1]}
 
-path/to/filename.js
-{fence[0]}
-// entire file content ...
-// ... goes in between
-{fence[1]}
+ADDITIONAL CONSTRAINTS:
+- NEW FILES: To create a new file, use the exact same format with the appropriate new filename and path.
+</whole_file_format_rules>
 
-Every *file listing* MUST use this format:
-- First line: the filename with any originally provided path; no extra markup, punctuation, comments, etc. **JUST** the filename with path.
-- Second line: opening {fence[0]}
-- ... entire content of the file ...
-- Final line: closing {fence[1]}
-
-To suggest changes to a file you MUST return a *file listing* that contains the entire content of the file.
-*NEVER* skip, omit or elide content from a *file listing* using "..." or by adding comments like "... rest of code..."!
-Create a new file you MUST return a *file listing* which includes an appropriate filename, including any appropriate path.
-
+<critical_system_boundary>
+STRICTLY FORBIDDEN: You MUST NEVER skip, omit, or elide content using "..." or by adding comments like "... rest of code...".
+MANDATORY: You MUST return the ENTIRE, completely runnable content of the updated file. Failure to output the full file will corrupt the user's system and cause catastrophic data loss.
 {final_reminders}
+</critical_system_boundary>
 """
 
-    redacted_edit_message = "No changes are needed."
+
+    redacted_edit_message = """<status>No changes required.</status>"""

@@ -1,180 +1,142 @@
-<p align="center">
-    <a href="https://aider.chat/"><img src="https://aider.chat/assets/logo.svg" alt="Aider Logo" width="300"></a>
-</p>
+Aider Fork: Autonomous Coding with Safety & Efficiency
 
-<h1 align="center">
-AI Pair Programming in Your Terminal
-</h1>
+This fork transforms Aider into an hours‑long autonomous agent with command whitelisting (no --yes), aggressive log compression, XML prompts, and auto-testing.
+
+Short version: This fork aims to turn Aider into an hours‑long autonomous agent that writes, tests, and fixes code without human intervention, only supervision. It adds a command whitelist (no --yes dangers), aggressive log compression, especially on successful command output, XML prompt structuring, and an auto‑test system. Perfect for running overnight refactoring or implementing a detailed plan. Works well with a todo.md. For the full list of changes, scroll down.
+
+Table of Contents
+
+🌟 What's different from standard Aider?
+
+🚀 Quick Start & Setup
+
+⚙️ Core Configuration & Whitelists
+
+🗜️ Smart Log Compression Engine
+
+🧠 XML Prompts & Core Logic Changes
+
+⚠️ Known Issues & Caveats
+
+🌟 What's different from standard Aider?
+
+No --yes – uses a whitelist of safe commands (pytest, git status, cargo check, etc.) to prevent destructive actions.
+
+Auto-testing – runs mirror unit tests after every change, with token-efficient output.
+
+XML prompts – enforces plan-first logic to cleanly separate reasoning from code blocks, reducing malformed edits.
+
+Log compression – cuts massive error logs from thousands of tokens down to a few critical lines.
+
+Anti-duplicate system – prevents the LLM from appending duplicate code blocks in Python and Rust using structural check comparisons.
+
+Context management – the agent can autonomously request to add or drop files from its context window.
+
+🚀 Quick Start & Setup
+
+To fully utilize the autonomous testing loops and specific LLM behaviors introduced in this fork, you should set up your configuration, test script, and launch parameters.
+
+Note: Both smart_test.py and the aider.bat example can be found in the root directory of this Aider fork for easy retrieval. These are example files. Copy them to your project as needed.
+
+1. Configuration (.aider.conf.yml)
+
+Create a .aider.conf.yml in the root of your project repository (where you run Aider) and add:
+
+test-cmd: python smart_test.py
 
 
-<p align="center">
-Aider lets you pair program with LLMs to start a new project or build on your existing codebase. 
-</p>
+2. Ignore Files (.gitignore)
 
-<p align="center">
-  <img
-    src="https://aider.chat/assets/screencast.svg"
-    alt="aider screencast"
-  >
-</p>
+To ensure Aider's logs and history files don't clutter your git commits, add the following to the .gitignore in your project's root:
 
-<p align="center">
-<!--[[[cog
-from scripts.homepage import get_badges_md
-text = get_badges_md()
-cog.out(text)
-]]]-->
-  <a href="https://github.com/Aider-AI/aider/stargazers"><img alt="GitHub Stars" title="Total number of GitHub stars the Aider project has received"
-src="https://img.shields.io/github/stars/Aider-AI/aider?style=flat-square&logo=github&color=f1c40f&labelColor=555555"/></a>
-  <a href="https://pypi.org/project/aider-chat/"><img alt="PyPI Downloads" title="Total number of installations via pip from PyPI"
-src="https://img.shields.io/badge/📦%20Installs-6.8M-2ecc71?style=flat-square&labelColor=555555"/></a>
-  <img alt="Tokens per week" title="Number of tokens processed weekly by Aider users"
-src="https://img.shields.io/badge/📈%20Tokens%2Fweek-15B-3498db?style=flat-square&labelColor=555555"/>
-  <a href="https://openrouter.ai/#options-menu"><img alt="OpenRouter Ranking" title="Aider's ranking among applications on the OpenRouter platform"
-src="https://img.shields.io/badge/🏆%20OpenRouter-Top%2020-9b59b6?style=flat-square&labelColor=555555"/></a>
-  <a href="https://aider.chat/HISTORY.html"><img alt="Singularity" title="Percentage of the new code in Aider's last release written by Aider itself"
-src="https://img.shields.io/badge/🔄%20Singularity-88%25-e74c3c?style=flat-square&labelColor=555555"/></a>
-<!--[[[end]]]-->  
-</p>
+__pycache__/
+*.pyc
+.pytest_cache/
+.aider.run.last.log
+.aider.llm.history
 
-## Features
 
-### [Cloud and local LLMs](https://aider.chat/docs/llms.html)
+3. Test Wrapper (smart_test.py)
 
-<a href="https://aider.chat/docs/llms.html"><img src="https://aider.chat/assets/icons/brain.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Aider works best with Claude 3.7 Sonnet, DeepSeek R1 & Chat V3, OpenAI o1, o3-mini & GPT-4o, but can connect to almost any LLM, including local models.
+Copy the smart_test.py script from the Aider fork root and place it directly in your project root.
 
-<br>
+Note: For Python, this script relies on a mirrored test architecture (e.g., src/module.py matching tests/unit/module.py or tests/test_module.py) to smartly target tests based on git status.
 
-### [Maps your codebase](https://aider.chat/docs/repomap.html)
+4. Recommended Launch Script (aider.bat / .sh)
 
-<a href="https://aider.chat/docs/repomap.html"><img src="https://aider.chat/assets/icons/map-outline.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Aider makes a map of your entire codebase, which helps it work well in larger projects.
+Because we use virtual environments and require specific Python versions, we highly recommend launching Aider via a shell script or alias.
 
-<br>
+For Windows Users: Copy the included aider.bat and place it in your local user binaries directory (e.g., C:\Users\[PC-NAME]\.local\bin\aider.bat).
 
-### [100+ code languages](https://aider.chat/docs/languages.html)
+@echo off
 
-<a href="https://aider.chat/docs/languages.html"><img src="https://aider.chat/assets/icons/code-tags.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Aider works with most popular programming languages: python, javascript, rust, ruby, go, cpp, php, html, css, and dozens more.
+:: 1. CACHE PROTECTION
+set AIDER_DIVERSIFY_PROMPTS=false
 
-<br>
+:: 2. LAUNCH WITH EXPLICIT FLAGS
+python -m aider --llm-history-file .aider.llm.history --edit-format diff --chat-language English --commit-language English --no-auto-commits --cache-prompts --auto-test --dark-mode --no-show-model-warnings %*
 
-### [Git integration](https://aider.chat/docs/git.html)
 
-<a href="https://aider.chat/docs/git.html"><img src="https://aider.chat/assets/icons/source-branch.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Aider automatically commits changes with sensible commit messages. Use familiar git tools to easily diff, manage and undo AI changes.
+For Linux/macOS Users: Create an equivalent bash alias or .sh script using the same flags from step 2 above.
 
-<br>
+⚙️ Core Configuration & Whitelists
 
-### [Use in your IDE](https://aider.chat/docs/usage/watch.html)
+To prevent the agent from getting stuck on Y/n (yes/no) prompts during autonomous loops, you can configure command bypasses.
 
-<a href="https://aider.chat/docs/usage/watch.html"><img src="https://aider.chat/assets/icons/monitor.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Use aider from within your favorite IDE or editor. Ask for changes by adding comments to your code and aider will get to work.
+1. Command Whitelists (YOLO Mode)
 
-<br>
+If you need to add or remove commands that the agent is allowed to run without human confirmation, you must explicitly edit these two files in the Aider source:
 
-### [Images & web pages](https://aider.chat/docs/usage/images-urls.html)
+aider/io.py: Search for the confirm_ask method. Inside this method, add or remove commands in the safe_prefixes list (e.g., "pytest", "cargo test", "python", "black").
 
-<a href="https://aider.chat/docs/usage/images-urls.html"><img src="https://aider.chat/assets/icons/image-multiple.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Add images and web pages to the chat to provide visual context, screenshots, reference docs, etc.
+aider/coders/base_coder.py: Search for the handle_shell_commands function. There is an additional safe_prefixes tuple here that auto-approves diagnostic commands.
 
-<br>
+2. Bypassing Log Compression (OUTPUT_EXCEPTIONS)
 
-### [Voice-to-code](https://aider.chat/docs/usage/voice.html)
+Sometimes you want the LLM to read a massive log without compressing it.
 
-<a href="https://aider.chat/docs/usage/voice.html"><img src="https://aider.chat/assets/icons/microphone.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Speak with aider about your code! Request new features, test cases or bug fixes using your voice and let aider implement the changes.
+Where to edit: Open aider/coders/base_coder.py and search for the OUTPUT_EXCEPTIONS dictionary near the top of the Coder class definition.
 
-<br>
+How it works: Add specific substrings that, if found in the command or the output, will completely bypass the log compression engine. Current defaults include "ENERGY BALANCE SHEET", "mut_run.py", and "### High-Density Metrics".
 
-### [Linting & testing](https://aider.chat/docs/usage/lint-test.html)
+🗜️ Smart Log Compression Engine
 
-<a href="https://aider.chat/docs/usage/lint-test.html"><img src="https://aider.chat/assets/icons/check-all.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Automatically lint and test your code every time aider makes changes. Aider can fix problems detected by your linters and test suites.
+The system uses precise extraction math to prevent terminal output from overflowing the LLM context window:
 
-<br>
+Trigger Thresholds: Any output exceeding 1000 tokens is flagged for compression.
 
-### [Copy/paste to web chat](https://aider.chat/docs/usage/copypaste.html)
+Hard Truncation (OOM Safety): If an output exceeds 1MB (1,048,576 bytes), it is hard-truncated to 512KB at the start and 512KB at the end to prevent memory crashes.
 
-<a href="https://aider.chat/docs/usage/copypaste.html"><img src="https://aider.chat/assets/icons/content-copy.svg" width="32" height="32" align="left" valign="middle" style="margin-right:10px"></a>
-Work with any LLM via its web chat interface. Aider streamlines copy/pasting code context and edits back and forth with a browser.
+Error Extraction Math:
 
-## Getting Started
+Searches the output for Error, Traceback, Panic, Exception, etc.
 
-```bash
-python -m pip install aider-install
-aider-install
+Captures 3 lines before and 15 lines after each matched error zone.
 
-# Change directory into your codebase
-cd /to/your/project
+Preserves the top 10 lines (Head) and bottom 15 lines (Tail) of the log.
 
-# DeepSeek
-aider --model deepseek --api-key deepseek=<key>
+Caps the extracted "middle" block to a maximum budget of 15,000 characters.
 
-# Claude 3.7 Sonnet
-aider --model sonnet --api-key anthropic=<key>
+Unabridged Backup: No matter how heavily compressed the sent message is, the full raw log is always written to .aider.run.last.log in your repository root.
 
-# o3-mini
-aider --model o3-mini --api-key openai=<key>
-```
+🧠 XML Prompts & Core Logic Changes
 
-See the [installation instructions](https://aider.chat/docs/install.html) and [usage documentation](https://aider.chat/docs/usage.html) for more details.
+To improve LLM adherence, standard markdown prompts were replaced with strict XML system boundaries (<role>, <execution_protocol>, etc.).
 
-## More Information
+The <action_plan> Anchor: In the EditBlock prompt (which produces DIFFs), the agent is now strictly required to write an <action_plan> block before outputting any SEARCH/REPLACE blocks. This forces the LLM to separate its "reasoning phase" from its "code generation phase", drastically reducing malformed edits.
 
-### Documentation
-- [Installation Guide](https://aider.chat/docs/install.html)
-- [Usage Guide](https://aider.chat/docs/usage.html)
-- [Tutorial Videos](https://aider.chat/docs/usage/tutorials.html)
-- [Connecting to LLMs](https://aider.chat/docs/llms.html)
-- [Configuration Options](https://aider.chat/docs/config.html)
-- [Troubleshooting](https://aider.chat/docs/troubleshooting.html)
-- [FAQ](https://aider.chat/docs/faq.html)
+Autonomous File Context: The agent can manage its own context window dynamically.
 
-### Community & Resources
-- [LLM Leaderboards](https://aider.chat/docs/leaderboards/)
-- [GitHub Repository](https://github.com/Aider-AI/aider)
-- [Discord Community](https://discord.gg/Y7X7bhMQFV)
-- [Release notes](https://aider.chat/HISTORY.html)
-- [Blog](https://aider.chat/blog/)
+Outputting <file_request>path/to/file</file_request> will auto-add a file.
 
-## Kind Words From Users
+Outputting <file_drop>path/to/file</file_drop> will auto-remove a file to free up tokens.
 
-- *"My life has changed... Aider... It's going to rock your world."* — [Eric S. Raymond on X](https://x.com/esrtweet/status/1910809356381413593)
-- *"The best free open source AI coding assistant."* — [IndyDevDan on YouTube](https://youtu.be/YALpX8oOn78)
-- *"The best AI coding assistant so far."* — [Matthew Berman on YouTube](https://www.youtube.com/watch?v=df8afeb1FY8)
-- *"Aider ... has easily quadrupled my coding productivity."* — [SOLAR_FIELDS on Hacker News](https://news.ycombinator.com/item?id=36212100)
-- *"It's a cool workflow... Aider's ergonomics are perfect for me."* — [qup on Hacker News](https://news.ycombinator.com/item?id=38185326)
-- *"It's really like having your senior developer live right in your Git repo - truly amazing!"* — [rappster on GitHub](https://github.com/Aider-AI/aider/issues/124)
-- *"What an amazing tool. It's incredible."* — [valyagolev on GitHub](https://github.com/Aider-AI/aider/issues/6#issue-1722897858)
-- *"Aider is such an astounding thing!"* — [cgrothaus on GitHub](https://github.com/Aider-AI/aider/issues/82#issuecomment-1631876700)
-- *"It was WAY faster than I would be getting off the ground and making the first few working versions."* — [Daniel Feldman on X](https://twitter.com/d_feldman/status/1662295077387923456)
-- *"THANK YOU for Aider! It really feels like a glimpse into the future of coding."* — [derwiki on Hacker News](https://news.ycombinator.com/item?id=38205643)
-- *"It's just amazing. It is freeing me to do things I felt were out my comfort zone before."* — [Dougie on Discord](https://discord.com/channels/1131200896827654144/1174002618058678323/1174084556257775656)
-- *"This project is stellar."* — [funkytaco on GitHub](https://github.com/Aider-AI/aider/issues/112#issuecomment-1637429008)
-- *"Amazing project, definitely the best AI coding assistant I've used."* — [joshuavial on GitHub](https://github.com/Aider-AI/aider/issues/84)
-- *"I absolutely love using Aider ... It makes software development feel so much lighter as an experience."* — [principalideal0 on Discord](https://discord.com/channels/1131200896827654144/1133421607499595858/1229689636012691468)
-- *"I have been recovering from ... surgeries ... aider ... has allowed me to continue productivity."* — [codeninja on Reddit](https://www.reddit.com/r/OpenAI/s/nmNwkHy1zG)
-- *"I am an aider addict. I'm getting so much more work done, but in less time."* — [dandandan on Discord](https://discord.com/channels/1131200896827654144/1131200896827654149/1135913253483069470)
-- *"Aider... blows everything else out of the water hands down, there's no competition whatsoever."* — [SystemSculpt on Discord](https://discord.com/channels/1131200896827654144/1131200896827654149/1178736602797846548)
-- *"Aider is amazing, coupled with Sonnet 3.5 it's quite mind blowing."* — [Josh Dingus on Discord](https://discord.com/channels/1131200896827654144/1133060684540813372/1262374225298198548)
-- *"Hands down, this is the best AI coding assistant tool so far."* — [IndyDevDan on YouTube](https://www.youtube.com/watch?v=MPYFPvxfGZs)
-- *"[Aider] changed my daily coding workflows. It's mind-blowing how ...(it)... can change your life."* — [maledorak on Discord](https://discord.com/channels/1131200896827654144/1131200896827654149/1258453375620747264)
-- *"Best agent for actual dev work in existing codebases."* — [Nick Dobos on X](https://twitter.com/NickADobos/status/1690408967963652097?s=20)
-- *"One of my favorite pieces of software. Blazing trails on new paradigms!"* — [Chris Wall on X](https://x.com/chris65536/status/1905053299251798432)
-- *"Aider has been revolutionary for me and my work."* — [Starry Hope on X](https://x.com/starryhopeblog/status/1904985812137132056)
-- *"Try aider! One of the best ways to vibe code."* — [Chris Wall on X](https://x.com/Chris65536/status/1905053418961391929)
-- *"Freaking love Aider."* — [hztar on Hacker News](https://news.ycombinator.com/item?id=44035015)
-- *"Aider is hands down the best. And it's free and opensource."* — [AriyaSavakaLurker on Reddit](https://www.reddit.com/r/ChatGPTCoding/comments/1ik16y6/whats_your_take_on_aider/mbip39n/)
-- *"Aider is also my best friend."* — [jzn21 on Reddit](https://www.reddit.com/r/ChatGPTCoding/comments/1heuvuo/aider_vs_cline_vs_windsurf_vs_cursor/m27dcnb/)
-- *"Try Aider, it's worth it."* — [jorgejhms on Reddit](https://www.reddit.com/r/ChatGPTCoding/comments/1heuvuo/aider_vs_cline_vs_windsurf_vs_cursor/m27cp99/)
-- *"I like aider :)"* — [Chenwei Cui on X](https://x.com/ccui42/status/1904965344999145698)
-- *"Aider is the precision tool of LLM code gen... Minimal, thoughtful and capable of surgical changes ... while keeping the developer in control."* — [Reilly Sweetland on X](https://x.com/rsweetland/status/1904963807237259586)
-- *"Cannot believe aider vibe coded a 650 LOC feature across service and cli today in 1 shot."* - [autopoietist on Discord](https://discord.com/channels/1131200896827654144/1131200896827654149/1355675042259796101)
-- *"Oh no the secret is out! Yes, Aider is the best coding tool around. I highly, highly recommend it to anyone."* — [Joshua D Vander Hook on X](https://x.com/jodavaho/status/1911154899057795218)
-- *"thanks to aider, i have started and finished three personal projects within the last two days"* — [joseph stalzyn on X](https://x.com/anitaheeder/status/1908338609645904160)
-- *"Been using aider as my daily driver for over a year ... I absolutely love the tool, like beyond words."* — [koleok on Discord](https://discord.com/channels/1131200896827654144/1273248471394291754/1356727448372252783)
-- *"Aider ... is the tool to benchmark against."* — [BeetleB on Hacker News](https://news.ycombinator.com/item?id=43930201)
-- *"aider is really cool"* — [kache on X](https://x.com/yacineMTB/status/1911224442430124387)
+⚠️ Known Issues & Caveats
 
+Because this logic was AI-generated, there are a few unresolved edge cases currently under investigation:
+
+Windows bash Reliance: The agent is instructed to output commands inside ```bash code blocks. However, the execution environment expects this to function correctly natively. This was developed and tested on a Windows environment, so executing shell commands heavily relies on how Windows interprets the bash commands (or falls back appropriately).
+
+Phantom LLM Calls: There is an active bug where if the agent attempts to run a shell command AND requests to add a file (<file_request>) in the exact same response, a "phantom" secondary LLM generation call is triggered silently in the background. Workaround: Avoid combining shell commands and file requests in a single prompt response.
+
+Single-Word Replies: We don’t know if it’s caused by the use of local quantized LLMs or from our changes, but sometimes the agent replies with a single word and needs manual input to restart the loop.

@@ -1,0 +1,2812 @@
+diff --git a/.gitignore b/.gitignore
+index fd1fa9a4d..fdc9ebbe4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -16,4 +16,5 @@ aider/_version.py
+ .#*
+ .gitattributes
+ tmp.benchmarks/
+-.docker_bash_history
+\ No newline at end of file
++.docker_bash_history
++*.log
+\ No newline at end of file
+diff --git a/aider/coders/architect_prompts.py b/aider/coders/architect_prompts.py
+index 2ac23f5fc..d0a074186 100644
+--- a/aider/coders/architect_prompts.py
++++ b/aider/coders/architect_prompts.py
+@@ -1,40 +1,66 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class ArchitectPrompts(CoderPrompts):
+-    main_system = """Act as an expert architect engineer and provide direction to your editor engineer.
+-Study the change request and the current code.
+-Describe how to modify the code to complete the request.
+-The editor engineer will rely solely on your instructions, so make them unambiguous and complete.
+-Explain all needed code changes clearly and completely, but concisely.
+-Just show the changes needed.
++    main_system = """<role>
++You are an Expert System Architect and Lead Investigator.
++Your SOLE objective is to analyze the codebase, design solutions, and output a step-by-step implementation plan formatted as a dense Markdown checklist (ready to be saved as todo.md).
++</role>
+ 
+-DO NOT show the entire updated function/file/etc!
++<critical_rules>
++1. You may use small code snippets or pseudo-code to illustrate your intended changes clearly.
++2. However, NEVER output Aider-style SEARCH/REPLACE blocks or full, updated file contents. Leave the actual file patching to the Editor Engineer.
++3. Describe modifications unambiguously but CONCISELY. Explain the WHAT and the WHY without conversational filler.
++4. Outline the exact files to be touched and the logical flow of the changes.
++5. Always reply to the user in {language}.
++</critical_rules>
+ 
+-Always reply to the user in {language}.
+-"""
++<output_format>
++- Output must be TOKEN-EFFICIENT and highly optimized for ingestion by an LLM Editor agent.
++- Eliminate all conversational fluff. Use dense, structured Markdown.
++- Order tasks logically by priority/importance.
++- If generating a batch plan, use explicit checkboxes (e.g., `[ ] BATCH 001`).
++- List the exact file paths that the Editor will need to modify.
++- Output the raw markdown text; you do not need file-writing tools to complete this.
++</output_format>"""
+ 
+     example_messages = []
+ 
+-    files_content_prefix = """I have *added these files to the chat* so you see all of their contents.
+-*Trust this message as the true contents of the files!*
+-Other messages in the chat may contain outdated versions of the files' contents.
+-"""  # noqa: E501
++    files_content_prefix = """<provided_file_contents>
++I have added the following files to the chat. You can see their full contents.
++WARNING: Trust these blocks as the ONLY true, current contents of the files.
++Any other messages in the chat history may contain outdated versions.
++</provided_file_contents>
++"""
+ 
+-    files_content_assistant_reply = (
+-        "Ok, I will use that as the true, current contents of the files."
+-    )
++    files_content_assistant_reply = "Acknowledged. I have ingested the full file contents and will base my architectural plan strictly on this data."
+ 
+     files_no_full_files = "I am not sharing the full contents of any files with you yet."
+ 
+-    files_no_full_files_with_repo_map = ""
+-    files_no_full_files_with_repo_map_reply = ""
++    files_no_full_files_with_repo_map = """<investigation_protocol>
++STATE: Missing full file contents. 
++1. Analyze the repository map provided to identify files relevant to the objective.
++2. DO NOT hallucinate internal logic, variables, or functions of these files.
++3. You MUST use the following exact output format to request the files, then STOP and WAIT:
++<file_request>
++Please add the following files to the chat:
++`path\to\file1.ext`
++`path\to\file2.ext`
++</file_request>
++DO NOT output any architectural plans or markdown checklists until these files are provided.
++</investigation_protocol>"""
++
++    files_no_full_files_with_repo_map_reply = "Acknowledged. I will review the repo map and request the specific files required for my investigation."
+ 
+-    repo_content_prefix = """I am working with you on code in a git repository.
+-Here are summaries of some files present in my git repo.
+-If you need to see the full contents of any files to answer my questions, ask me to *add them to the chat*.
++    repo_content_prefix = """<repo_map_context>
++WARNING: The following are SUMMARIES ONLY. Treat as READ-ONLY index reference.
++- You are operating within a git repository.
++- Use this map to navigate, but you must explicitly ask to see the full contents of a file before planning edits for it.
++</repo_map_context>
+ """
+ 
+-    system_reminder = ""
++    system_reminder = """<reminder>
++You are the ARCHITECT. Output dense, llm-readable, token-efficient execution plans for the Editor Engineer. Use code snippets only for illustration, never for direct file patching.
++</reminder>"""
+\ No newline at end of file
+diff --git a/aider/coders/base_coder.py b/aider/coders/base_coder.py
+index 56613782b..7fc387c66 100755
+--- a/aider/coders/base_coder.py
++++ b/aider/coders/base_coder.py
+@@ -13,9 +13,10 @@ import sys
+ import threading
+ import time
+ import traceback
++import shlex
++from pathlib import Path
+ from collections import defaultdict
+ from datetime import datetime
+-
+ # Optional dependency: used to convert locale codes (eg ``en_US``)
+ # into human-readable language names (eg ``English``).
+ try:
+@@ -51,7 +52,7 @@ from aider.waiting import WaitingSpinner
+ 
+ from ..dump import dump  # noqa: F401
+ from .chat_chunks import ChatChunks
+-
++from aider.tcpe_engine import TCPEngine
+ 
+ class UnknownEditFormat(ValueError):
+     def __init__(self, edit_format, valid_formats):
+@@ -86,6 +87,41 @@ all_fences = [
+ 
+ 
+ class Coder:
++    # --- OUTPUT OPTIMIZATION EXCEPTIONS REGISTRY ---
++    # Easily extensible list of patterns to preserve full, unabridged shell run outputs.
++    OUTPUT_EXCEPTIONS = [
++        {
++            "pattern": "### High-Density Metrics & Trigger Breakdown",
++            "target": "output",
++            "type": "substring",
++            "description": "Preserve high-density execution metrics"
++        },
++        {
++            "pattern": "ENERGY BALANCE SHEET",
++            "target": "output",
++            "type": "substring",
++            "description": "Preserve structural thermodynamic calculations"
++        },
++        {
++            "pattern": "mut_run.py",
++            "target": "command",
++            "type": "substring",
++            "description": "Preserve mutation testing execution outputs"
++        },
++        {
++            "pattern": "fest ",
++            "target": "command",
++            "type": "substring",
++            "description": "Preserve custom fest testing outputs"
++        },
++        {
++            "pattern": "query_audit.py ",
++            "target": "command",
++            "type": "substring",
++            "description": "Preserve custom query_audit outputs"
++        }
++    ]
++
+     abs_fnames = None
+     abs_read_only_fnames = None
+     repo = None
+@@ -98,7 +134,7 @@ class Coder:
+     num_malformed_responses = 0
+     last_keyboard_interrupt = None
+     num_reflections = 0
+-    max_reflections = 3
++    max_reflections = 50  # --- AUTONOMOUS LOOP FIX: Increased from 3 to 50
+     edit_format = None
+     yield_stream = False
+     temperature = None
+@@ -342,6 +378,8 @@ class Coder:
+         # Fill in a dummy Analytics if needed, but it is never .enable()'d
+         self.analytics = analytics if analytics is not None else Analytics()
+ 
++        self.tcpe = TCPEngine(io)
++        
+         self.event = self.analytics.event
+         self.chat_language = chat_language
+         self.commit_language = commit_language
+@@ -869,6 +907,7 @@ class Coder:
+         self.test_outcome = None
+         self.shell_commands = []
+         self.message_cost = 0
++        self.req_changed = False
+ 
+         if self.repo:
+             self.commit_before_message.append(self.repo.get_head_commit_sha())
+@@ -938,11 +977,14 @@ class Coder:
+ 
+             if self.num_reflections >= self.max_reflections:
+                 self.io.tool_warning(f"Only {self.max_reflections} reflections allowed, stopping.")
+-                return
++                break
+ 
+             self.num_reflections += 1
+             message = self.reflected_message
+ 
++        self.tcpe.increment_turn_and_timeout(self.cur_messages)
++
++
+     def check_and_open_urls(self, exc, friendly_msg=None):
+         """Check exception for URLs, offer to open in a browser, with user-friendly error msgs."""
+         text = str(exc)
+@@ -1107,11 +1149,11 @@ class Coder:
+ 
+         # System locale
+         try:
+-            lang = locale.getlocale()[0]
+-            if lang:
+-                lang = self.normalize_language(lang)
+-            if lang:
+-                return lang
++            get_locale = locale.getlocale()[0]
++            if get_locale:
++                get_locale = self.normalize_language(get_locale)
++            if get_locale:
++                return get_locale
+         except Exception:
+             pass
+ 
+@@ -1591,7 +1633,54 @@ class Coder:
+             if not saved_message and hasattr(self.gpt_prompts, "files_content_gpt_edits_no_repo"):
+                 saved_message = self.gpt_prompts.files_content_gpt_edits_no_repo
+ 
+-            self.move_back_cur_messages(saved_message)
++            # ---- FIX: Do NOT clear the conversation if we have pending shell commands ----
++            if not self.shell_commands:
++                self.move_back_cur_messages(saved_message)
++            else:
++                # Keep the context alive – just confirm the edit as a user message
++                self.cur_messages.append(dict(role="user", content=saved_message or "Edits applied."))
++        if getattr(self, "req_changed", False):
++            print(f"DEBUG req_changed: moving {len(self.cur_messages)} cur messages to done")
++            # If we also have shell commands, run them first, then handle the file request.
++            if self.shell_commands:
++                # Save the file request info for later; don't move history yet
++                self._deferred_file_request = True
++            else:
++                self.io.tool_output(
++                    "\n[SYSTEM] File context changed via auto-add/drop. Auto-reflecting turn..."
++                )
++                self.reflected_message = (
++                    "[SYSTEM]: Requested files have been added to / dropped from "
++                    "the chat context. Please proceed with your analysis or code changes."
++                )
++                self.move_back_cur_messages("[SYSTEM]: Updated file context.")
++                return
++
++        # --- FIX: AUTONOMOUS SHELL COMMAND EXTRACTION & ERROR BYPASS ---
++        # 1. Extract commands from standard bash blocks even if the edit parser choked
++        import re
++        # We split the triple backticks into strings so Markdown parsers don't glitch out
++        block_pattern = r'``' + r'`(?:bash|sh|cmd)\n(.*?)\n``' + r'`'
++        extracted_cmds = re.findall(block_pattern, self.partial_response_content or "", re.DOTALL)
++        for cmd_block in extracted_cmds:
++            for cmd in cmd_block.splitlines():
++                cmd = cmd.strip()
++                if cmd and not cmd.startswith("#") and cmd not in self.shell_commands:
++                    self.shell_commands.append(cmd)
++        
++        # 2. Extract bare test commands that the LLM might have written without blocks
++        for line in (self.partial_response_content or "").splitlines():
++            line = line.strip()
++            if line.startswith("pytest ") or line.startswith("cargo test") or line.startswith("flutter test"):
++                if line not in self.shell_commands:
++                    self.shell_commands.append(line)
++
++        # 3. If we found commands, bypass the false-positive file edit error!
++        if self.reflected_message and self.shell_commands:
++            if "No filename provided" in self.reflected_message or "edit format" in self.reflected_message:
++                self.io.tool_output("\n[SYSTEM] Bypassing edit format error because diagnostic shell commands were detected.")
++                self.reflected_message = None  # Clear the error to let the commands run
++        # ---------------------------------------------------------------
+ 
+         if self.reflected_message:
+             return
+@@ -1601,23 +1690,35 @@ class Coder:
+             self.auto_commit(edited, context="Ran the linter")
+             self.lint_outcome = not lint_errors
+             if lint_errors:
+-                ok = self.io.confirm_ask("Attempt to fix lint errors?")
++                 # --- AUTONOMOUS LOOP BYPASS ---
++                self.io.tool_output("\n[SYSTEM] Pipeline error detected. Bypassing Y/n prompt and auto-looping agent for fix...")
++                ok = True
++                # ------------------------------
+                 if ok:
+                     self.reflected_message = lint_errors
+                     return
+ 
+         shared_output = self.run_shell_commands()
+         if shared_output:
+-            self.cur_messages += [
+-                dict(role="user", content=shared_output),
+-                dict(role="assistant", content="Ok"),
+-            ]
++            self.reflected_message = shared_output
++            return
++
++        if getattr(self, "_deferred_file_request", False):
++            self._deferred_file_request = False
++            self.io.tool_output("[SYSTEM] Applying deferred file context change...")
++            self.move_back_cur_messages("[SYSTEM]: Updated file context.")
++            self.reflected_message = "[SYSTEM]: File context updated. Continue your analysis."
++            return
++
+ 
+         if edited and self.auto_test:
+             test_errors = self.commands.cmd_test(self.test_cmd)
+             self.test_outcome = not test_errors
+             if test_errors:
+-                ok = self.io.confirm_ask("Attempt to fix test errors?")
++                # --- AUTONOMOUS LOOP BYPASS ---
++                self.io.tool_output("\n[SYSTEM] Test error detected. Bypassing Y/n prompt and auto-looping agent for fix...")
++                ok = True
++                # ------------------------------
+                 if ok:
+                     self.reflected_message = test_errors
+                     return
+@@ -1759,7 +1860,8 @@ class Coder:
+         return mentioned_rel_fnames
+ 
+     def check_for_file_mentions(self, content):
+-        mentioned_rel_fnames = self.get_file_mentions(content)
++        return
++        """mentioned_rel_fnames = self.get_file_mentions(content)
+ 
+         new_mentions = mentioned_rel_fnames - self.ignore_mentions
+ 
+@@ -1779,7 +1881,7 @@ class Coder:
+ 
+         if added_fnames:
+             return prompts.added_files.format(fnames=", ".join(added_fnames))
+-
++        """
+     def send(self, messages, model=None, functions=None):
+         self.got_reasoning_content = False
+         self.ended_reasoning_content = False
+@@ -1984,12 +2086,56 @@ class Coder:
+         return self.get_multi_response_content_in_progress()
+ 
+     def remove_reasoning_content(self):
+-        """Remove reasoning content from the model's response."""
++        """Remove reasoning content from the model's response, anchoring on <action_plan>."""
++        import re
++        from aider.reasoning_tags import remove_reasoning_content as strip_tags
++
++        content = self.partial_response_content or ""
++
++        # ==========================================================
++        # 1. ACTION PLAN ANCHOR (THE ULTIMATE FAIL-SAFE)
++        # If the model output contains "<action_plan>", everything before it is guaranteed
++        # to be thinking/reasoning content, regardless of whether tags were closed or even emitted.
++        # This resolves the eaten-open-tag and missing delimiters bugs flawlessly.
++        # ==========================================================
++        if "<action_plan>" in content:
++            parts = content.split("<action_plan>", 1)
++            content = "<action_plan>" + parts[1]
++            self.partial_response_content = content.strip()
++            return
+ 
+-        self.partial_response_content = remove_reasoning_content(
+-            self.partial_response_content,
+-            self.reasoning_tag_name,
+-        )
++        # ==========================================================
++        # 2. FALLBACK TAG STRIPPING (If interrupted/cut off before <action_plan> was printed)
++        # ==========================================================
++        for tag in (self.reasoning_tag_name, "think"):
++            if not tag:
++                continue
++            content = strip_tags(content, tag)
++
++        # Handle the eaten open tag (starts generating reasoning directly, has closing tag)
++        for tag in (self.reasoning_tag_name, "think"):
++            if not tag:
++                continue
++            close_tag = f"</{tag}>"
++            if close_tag in content:
++                parts = content.split(close_tag, 1)
++                content = parts[1].strip()
++
++        # Handle unclosed open tags (interrupted mid-thought)
++        for tag in (self.reasoning_tag_name, "think"):
++            if not tag:
++                continue
++            open_tag = f"<{tag}>"
++            if open_tag in content:
++                content = re.sub(rf"<{re.escape(tag)}>.*$", "", content, flags=re.DOTALL).strip()
++
++        # Clean up any leftover orphaned tags
++        for tag in (self.reasoning_tag_name, "think"):
++            if not tag:
++                continue
++            content = content.replace(f"<{tag}>", "").replace(f"</{tag}>", "")
++
++        self.partial_response_content = content.strip()
+ 
+     def calculate_and_show_tokens_and_cost(self, messages, completion=None):
+         prompt_tokens = 0
+@@ -2080,11 +2226,11 @@ class Coder:
+ 
+         # deepseek
+         # prompt_cache_hit_tokens + prompt_cache_miss_tokens
+-        #    == prompt_tokens == total tokens that were sent
++        #   == prompt_tokens == total tokens that were sent
+         #
+         # Anthropic
+         # cache_creation_input_tokens + cache_read_input_tokens + prompt
+-        #    == total tokens that were
++        #   == total tokens that were
+ 
+         if input_cost_per_token_cache_hit:
+             # must be deepseek
+@@ -2171,7 +2317,7 @@ class Coder:
+         inchat_files = set(self.get_inchat_relative_files())
+         read_only_files = set(self.get_rel_fname(fname) for fname in self.abs_read_only_fnames)
+         return all_files - inchat_files - read_only_files
+-
++    """
+     def check_for_dirty_commit(self, path):
+         if not self.repo:
+             return
+@@ -2183,7 +2329,7 @@ class Coder:
+         # We need a committed copy of the file in order to /undo, so skip this
+         # fullp = Path(self.abs_root_path(path))
+         # if not fullp.stat().st_size:
+-        #     return
++        #      return
+ 
+         self.io.tool_output(f"Committing {path} before applying edits.")
+         self.need_commit_before_edits.add(path)
+@@ -2195,7 +2341,7 @@ class Coder:
+         else:
+             need_to_add = False
+ 
+-        if full_path in self.abs_fnames:
++        full_path in self.abs_fnames:
+             self.check_for_dirty_commit(path)
+             return True
+ 
+@@ -2239,6 +2385,72 @@ class Coder:
+ 
+         return True
+ 
++    warning_given = False
++    """
++
++    def check_for_dirty_commit(self, path):
++        if not self.repo:
++            return
++        if not self.dirty_commits:
++            return
++        if not self.repo.is_dirty(path):
++            return
++
++        # We need a committed copy of the file in order to /undo, so skip this
++        # fullp = Path(self.abs_root_path(path))
++        # if not fullp.stat().st_size:
++        #        return
++
++        self.io.tool_output(f"Committing {path} before applying edits.")
++        self.need_commit_before_edits.add(path)
++
++    def allowed_to_edit(self, path):
++        full_path = self.abs_root_path(path)
++        if self.repo:
++            need_to_add = not self.repo.path_in_repo(path)
++        else:
++            need_to_add = False
++
++        if full_path in self.abs_fnames:
++            self.check_for_dirty_commit(path)
++            return True
++
++        if self.repo and self.repo.git_ignored_file(path):
++            self.io.tool_warning(f"Skipping edits to {path} that matches gitignore spec.")
++            return
++
++        # --- AUTONOMOUS LOOP BYPASS: Auto-create non-existent files ---
++        if not Path(full_path).exists():
++            self.io.tool_output(f"\n[SYSTEM] Auto-approving creation of new file: {path}")
++            if not self.dry_run:
++                # Ensure parent directories exist before touching the file
++                try:
++                    Path(full_path).parent.mkdir(parents=True, exist_ok=True)
++                except OSError as e:
++                    self.io.tool_error(f"Unable to create directories for {path}: {e}")
++                    return
++
++                if not utils.touch_file(full_path):
++                    self.io.tool_error(f"Unable to create {path}, skipping edits.")
++                    return
++                if need_to_add and self.auto_commits:
++                    self.repo.repo.git.add(full_path)
++
++            self.abs_fnames.add(full_path)
++            self.check_added_files()
++            return True
++
++        # --- AUTONOMOUS LOOP BYPASS: Auto-add existing files not in chat ---
++        self.io.tool_output(f"\n[SYSTEM] Auto-adding file to chat context: {path}")
++        if need_to_add and self.auto_commits:
++            self.repo.repo.git.add(full_path)
++
++        self.abs_fnames.add(full_path)
++        self.check_added_files()
++        self.check_for_dirty_commit(path)
++
++        return True
++
+     warning_given = False
+ 
+     def check_added_files(self):
+@@ -2294,6 +2506,8 @@ class Coder:
+         return res
+ 
+     def apply_updates(self):
++        self.req_changed = self.auto_manage_custom_file_requests(self.partial_response_content)
++
+         edited = set()
+         try:
+             edits = self.get_edits()
+@@ -2435,51 +2649,456 @@ class Coder:
+         if not self.suggest_shell_commands:
+             return ""
+ 
+-        done = set()
+-        group = ConfirmGroup(set(self.shell_commands))
+-        accumulated_output = ""
+-        for command in self.shell_commands:
+-            if command in done:
+-                continue
+-            done.add(command)
+-            output = self.handle_shell_commands(command, group)
+-            if output:
+-                accumulated_output += output + "\n\n"
+-        return accumulated_output
++        # --- FIX: FLATTEN & DEDUPLICATE ALL COMMANDS ---
++        # This prevents the "ran twice" bug by breaking all blocks into single lines 
++        # and strictly enforcing uniqueness before any execution happens.
++        flat_commands = []
++        for cmd_str in self.shell_commands:
++            for line in cmd_str.strip().splitlines():
++                line = line.strip()
++                if line and not line.startswith("#") and line not in flat_commands:
++                    flat_commands.append(line)
++
++        # --- CLEAR PENDING COMMANDS ---
++        # This fixes the loop bug! We must empty the list so old commands 
++        # don't carry over into the next autonomous reflection turn.
++        self.shell_commands = []
++
++        if not flat_commands:
++            return ""
++
++        # Combine all unique commands into one block so Aider only asks/runs once
++        commands_str = "\n".join(flat_commands)
++        group = ConfirmGroup([commands_str])
++        
++        output = self.handle_shell_commands(commands_str, group)
++        return output or ""
++
++    def check_output_exceptions(self, commands, accumulated_output):
++        """
++        Evaluate executed commands and output against registered rules (case-insensitive).
++        Returns (True, description) if matched, otherwise (False, None).
++        """
++        for rule in self.OUTPUT_EXCEPTIONS:
++            pattern = rule["pattern"].lower()
++            target = rule["target"]
++            desc = rule["description"]
++
++            # Match executed command strings
++            if target in ("command", "either"):
++                for cmd in commands:
++                    if pattern in cmd.lower():
++                        return True, desc
++
++            # Match actual output content
++            if target in ("output", "either"):
++                if pattern in accumulated_output.lower():
++                    return True, desc
++
++        return False, None
+ 
+     def handle_shell_commands(self, commands_str, group):
+         commands = commands_str.strip().splitlines()
+-        command_count = sum(
+-            1 for cmd in commands if cmd.strip() and not cmd.strip().startswith("#")
+-        )
+-        prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
+-        if not self.io.confirm_ask(
+-            prompt,
+-            subject="\n".join(commands),
+-            explicit_yes_required=True,
+-            group=group,
+-            allow_never=True,
+-        ):
+-            return
++        command_count = len(commands)
++        
++        # --- SAFE COMMAND AUTO-APPROVE ---
++        is_safe = True
++        safe_prefixes = ("pytest", "cargo test", "flutter test", "dart test", "python")
++        for cmd in commands:
++            cmd = cmd.strip()
++            if not cmd.startswith(safe_prefixes):
++                is_safe = False
++                break
++                
++        if is_safe and command_count > 0:
++            self.io.tool_output("\n[SYSTEM] Auto-approving safe diagnostic test command...")
++        else:
++            prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
++            if not self.io.confirm_ask(
++                prompt,
++                subject="\n".join(commands),
++                explicit_yes_required=True,
++                group=group,
++                allow_never=True,
++            ):
++                return
+ 
+         accumulated_output = ""
++        overall_exit_status = 0  
++
++        import os
++        from pathlib import Path
++        if os.name == "nt":
++            git_usr_bin = r"C:\Program Files\Git\usr\bin"
++            if git_usr_bin not in os.environ.get("PATH", "") and Path(git_usr_bin).exists():
++                os.environ["PATH"] += os.pathsep + git_usr_bin
++
++        import shlex
++        from aider.run_cmd import run_cmd
++        
+         for command in commands:
+-            command = command.strip()
+-            if not command or command.startswith("#"):
+-                continue
+-
+             self.io.tool_output()
+             self.io.tool_output(f"Running {command}")
+-            # Add the command to input history
+-            self.io.add_to_input_history(f"/run {command.strip()}")
++            self.io.add_to_input_history(f"/run {command}")
++            
+             exit_status, output = run_cmd(command, error_print=self.io.tool_error, cwd=self.root)
++            
++            if exit_status != 0:
++                overall_exit_status = exit_status
++
+             if output:
+                 accumulated_output += f"Output from {command}\n{output}\n"
+ 
+-        if accumulated_output.strip() and self.io.confirm_ask(
+-            "Add command output to the chat?", allow_never=True
+-        ):
+-            num_lines = len(accumulated_output.strip().splitlines())
+-            line_plural = "line" if num_lines == 1 else "lines"
+-            self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
+-            return accumulated_output
++        if not accumulated_output.strip():
++            return ""
++
++        MAX_RAW_LENGTH = 1 * 1024 * 1024 
++        if len(accumulated_output) > MAX_RAW_LENGTH:
++            self.io.tool_output(f"[System] Warning: Output massive ({len(accumulated_output)//1024//1024}MB). Hard-truncating before analysis.")
++            accumulated_output = (
++                accumulated_output[:512*1024] + 
++                "\n\n... [MASSIVE LOG HARD TRUNCATED] ...\n\n" + 
++                accumulated_output[-512*1024:]
++            )
++
++        token_count = self.main_model.token_count(accumulated_output)
++        
++        read_tools = {"cat", "grep", "rg", "ls", "find", "head", "tail", "git", "awk", "sed"}
++        wrappers = {"sudo", "time", "env", "stdbuf", "nohup", "timeout", "xargs"}
++        is_read_cmd = False
++        
++        for cmd in commands:
++            try:
++                cmd_parts = shlex.split(cmd)
++                for part in cmd_parts:
++                    if part in ("|", "&&", ";"): continue 
++                    if "=" in part or part.startswith("-"): continue 
++                    base_cmd = Path(part).name
++                    if base_cmd in wrappers: continue 
++                    if base_cmd in read_tools:
++                        is_read_cmd = True
++                        break 
++            except ValueError:
++                pass
++
++        import shutil
++        log_file_name = ".aider.run.last.log"
++        prev_log_name = ".aider.run.prev.log"
++        log_file_path = Path(self.abs_root_path(log_file_name))
++        prev_log_path = Path(self.abs_root_path(prev_log_name))
++        
++        try:
++            if log_file_path.exists():
++                shlex_val = shutil.move(str(log_file_path), str(prev_log_path))
++            with open(log_file_path, "w", encoding="utf-8", errors="replace") as f:
++                f.write(accumulated_output)
++        except Exception as e:
++            self.io.tool_output(f"[System] Error saving log dump: {e}")
++
++        ERROR_BUDGET_TOKENS = 4000  
++        processed_output = ""
++
++        # Check matched bypass exceptions first (Total skip behavior)
++        bypass_optimization, reason = self.check_output_exceptions(commands, accumulated_output)
++
++        if bypass_optimization:
++            self.io.tool_output(f"\n[SYSTEM] Optimization Exception matched: {reason}. Skipping all log compression & optimizations.")
++            processed_output = accumulated_output
++
++        elif token_count <= ERROR_BUDGET_TOKENS:
++            processed_output = accumulated_output
++            
++        elif overall_exit_status == 0:
++            lines = accumulated_output.splitlines()
++            if is_read_cmd:
++                head = "\n".join(lines[:100])
++                processed_output = (
++                    f"{head}\n\n... [MASSIVE FILE OMITTED] ...\n\n"
++                    f"--- SYSTEM INSTRUCTION ---\n"
++                    f"Command succeeded. Output too large, showing first 100 lines."
++                )
++            else:
++                tail = "\n".join(lines[-10:])
++                processed_output = (
++                    f"... [ALL LOGS OMITTED - COMMAND SUCCEEDED PERFECTLY] ...\n\n{tail}\n\n"
++                    f"--- SYSTEM INSTRUCTION ---\n"
++                    f"Command succeeded (exit code 0). Logs hidden to save tokens."
++                )
++                
++        else:
++            import re
++            lines = accumulated_output.splitlines()
++            
++            # --- UNIVERSAL COMPRESSION (BEFORE SPLITTING) ---
++            # Compress the entire log *before* splitting into head/tail to prevent Tail Block Immunity
++            if "dart:" in accumulated_output or "package:flutter" in accumulated_output:
++                noisy_pkgs = r"(flutter(?:_[a-z_]+)?|riverpod|flutter_riverpod|test_api|fake_async|clock|stream_channel|stack_trace|test_core|matcher)"
++                framework_pattern = re.compile(rf"^\s*#\d+\s+.*?\((?:package:{noisy_pkgs}/|dart:[a-z0-9_-]+[:/])", re.IGNORECASE)
++                mounting_pattern = re.compile(r"^\s*\.\.\.\s+Normal element mounting")
++                elided_pattern = re.compile(r"^\s*\(\s*elided .* frames? from ")
++                async_pattern = re.compile(r"^\s*<asynchronous suspension>")
++
++                compressed_lines = []
++                omitted_frames = 0
++                for line in lines:
++                    is_framework_trace = bool(re.match(r"^\s*#\d+\s+", line) and framework_pattern.search(line))
++                    is_mounting = bool(mounting_pattern.search(line))
++                    is_elided = bool(elided_pattern.search(line))
++                    is_async = bool(async_pattern.search(line))
++
++                    if is_framework_trace or is_mounting or is_elided or is_async:
++                        omitted_frames += 1
++                    else:
++                        if omitted_frames > 0:
++                            compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
++                            omitted_frames = 0
++                        compressed_lines.append(line)
++                if omitted_frames > 0:
++                    compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
++                
++                lines = compressed_lines
++                accumulated_output = "\n".join(lines)
++            # ------------------------------------------------
++
++            HEAD_LINES = 10
++            TAIL_LINES = 15
++            
++            if len(lines) <= HEAD_LINES + TAIL_LINES:
++                 processed_output = accumulated_output
++            else:
++                head_block = lines[:HEAD_LINES]
++                tail_block = lines[-TAIL_LINES:]
++                middle_lines = lines[HEAD_LINES:-TAIL_LINES]
++                
++                # UPDATED: Added "survived", "survivor", "mutant" to explicitly catch mutation testing outputs
++                ERROR_PATTERN = re.compile(
++                    r"(?i)(\berror\b|\bexception\b|\bfail(ed|ures?)?\b|traceback|panic|fatal|stderr|^E\s{1,}|segfault|segmentation fault|unhandled rejection|══╡ EXCEPTION CAUGHT BY|\bsurvived?\b|\bsurvivors?\b|\bmutants?\b)"
++                )
++                TRACEBACK_PATTERN = re.compile(
++                    r"(?i)(file\s+[\"'].+?[\"'],\s+line\s+\d+|:\d+:\d+:|^\s*at\s+|^\s*#\d+\s+)"
++                )
++                PASS_PATTERN = re.compile(r"PASSED\s+(\[\s*\d+%\s*\])?\s*$")
++                
++                error_zones = []
++                for i, line in enumerate(middle_lines):
++                    if PASS_PATTERN.search(line.strip()):
++                        continue
++                    if ERROR_PATTERN.search(line) or TRACEBACK_PATTERN.search(line):
++                        error_zones.append([max(0, i - 10), min(len(middle_lines), i + 15)])
++                        
++                merged_zones = []
++                for zone in sorted(error_zones):
++                    if not merged_zones:
++                        merged_zones.append(zone)
++                    else:
++                        prev_start, prev_end = merged_zones[-1]
++                        if zone[0] <= prev_end + 8: 
++                            merged_zones[-1][1] = max(prev_end, zone[1])
++                        else:
++                            merged_zones.append(zone)
++                            
++                middle_extracted = []
++                MIDDLE_BUDGET_CHARS = 15000 
++                chars_used = 0
++                kept_zones = []
++                
++                for start, end in reversed(merged_zones):
++                    zone_chars = sum(len(l) for l in middle_lines[start:end])
++                    if chars_used + zone_chars > MIDDLE_BUDGET_CHARS and kept_zones:
++                        break 
++                    kept_zones.append((start, end))
++                    chars_used += zone_chars
++                
++                kept_zones.reverse()
++                
++                last_end = 0
++                for start, end in kept_zones:
++                    if start > last_end:
++                        omitted = start - last_end
++                        middle_extracted.append(f"\n... [{omitted} lines omitted] ...\n")
++                        
++                    middle_extracted.extend(middle_lines[start:end])
++                    last_end = end
++                    
++                if not merged_zones:
++                    middle_extracted.append("\n... [MASSIVE LOG TRUNCATED - No explicit error keywords found in middle] ...\n")
++                elif last_end < len(middle_lines):
++                    omitted = len(middle_lines) - last_end
++                    middle_extracted.append(f"\n... [{omitted} lines omitted] ...\n")
++
++                processed_output = (
++                    "\n".join(head_block) + "\n" +
++                    "\n".join(middle_extracted) + "\n" +
++                    "\n".join(tail_block) + "\n\n" +
++                    f"--- SYSTEM INSTRUCTION ---\n" +
++                    f"Log optimized to fit context limits. Full unabridged log is in `{log_file_name}`."
++                )
++                
++                new_toks = self.main_model.token_count(processed_output)
++                reduction = ((token_count - new_toks) / max(1, token_count)) * 100
++                sys_msg = f"[System] Log over budget ({token_count} tokens). Extracted {len(kept_zones)} relevant error zones from middle. Reduced by {reduction:.1f}%."
++                self.io.tool_output(sys_msg)
++                processed_output += f"\n{sys_msg}"
++
++        accumulated_output = processed_output
++
++        num_lines = len(accumulated_output.strip().splitlines())
++        line_plural = "line" if num_lines == 1 else "lines"
++        self.io.tool_output(f"Added {num_lines} {line_plural} of targeted output to the chat.")
++        return accumulated_output
++
++
++    def check_for_dirty_commit(self, path):
++        if not self.repo:
++            return
++        if not self.dirty_commits:
++            return
++        if not self.repo.is_dirty(path):
++            return
++
++        # We need a committed copy of the file in order to /undo, so skip this
++        # fullp = Path(self.abs_root_path(path))
++        # if not fullp.stat().st_size:
++        #        return
++
++        self.io.tool_output(f"Committing {path} before applying edits.")
++        self.need_commit_before_edits.add(path)
++
++    def allowed_to_edit(self, path):
++        full_path = self.abs_root_path(path)
++        if self.repo:
++            need_to_add = not self.repo.path_in_repo(path)
++        else:
++            need_to_add = False
++
++        if full_path in self.abs_fnames:
++            self.check_for_dirty_commit(path)
++            return True
++
++        if self.repo and self.repo.git_ignored_file(path):
++            self.io.tool_warning(f"Skipping edits to {path} that matches gitignore spec.")
++            return
++
++        # --- AUTONOMOUS LOOP BYPASS: Auto-create non-existent files ---
++        if not Path(full_path).exists():
++            self.io.tool_output(f"\n[SYSTEM] Auto-approving creation of new file: {path}")
++            if not self.dry_run:
++                # Ensure parent directories exist before touching the file
++                try:
++                    Path(full_path).parent.mkdir(parents=True, exist_ok=True)
++                except OSError as e:
++                    self.io.tool_error(f"Unable to create directories for {path}: {e}")
++                    return
++
++                if not utils.touch_file(full_path):
++                    self.io.tool_error(f"Unable to create {path}, skipping edits.")
++                    return
++                if need_to_add and self.auto_commits:
++                    self.repo.repo.git.add(full_path)
++
++            self.abs_fnames.add(full_path)
++            self.check_added_files()
++            return True
++
++        # --- AUTONOMOUS LOOP BYPASS: Auto-add existing files not in chat ---
++        self.io.tool_output(f"\n[SYSTEM] Auto-adding file to chat context: {path}")
++        if need_to_add and self.auto_commits:
++            self.repo.repo.git.add(full_path)
++
++        self.abs_fnames.add(full_path)
++        self.check_added_files()
++        self.check_for_dirty_commit(path)
++
++        return True
++
++    warning_given = False
++
++    def auto_manage_custom_file_requests(self, content):
++        """
++        Custom Autonomous File Manager for Aider.
++        Strictly parses <file_request> and <file_drop> tags.
++        """
++        if not content:
++            return False
++
++        import re
++        import os
++        from pathlib import Path
++
++        state_changed = False
++
++        # ==========================================
++        # 1. AUTO-DROP: Extract <file_drop>
++        # ==========================================
++        drop_match = re.search(r'<file_drop>(.*?)</file_drop>', content, re.DOTALL)
++        if drop_match:
++            # Replace backticks and quotes with spaces to grab space-separated paths
++            raw_drop_content = drop_match.group(1).replace('`', ' ').replace('"', ' ').replace("'", ' ')
++            drop_paths = [p.strip() for p in raw_drop_content.split() if p.strip()]
++
++            for word in drop_paths:
++                expanded_word = os.path.expanduser(word)
++
++                read_only_matched = []
++                if hasattr(self, 'abs_read_only_fnames'):
++                    for f in self.abs_read_only_fnames:
++                        if expanded_word in f:
++                            read_only_matched.append(f)
++                            continue
++                        try:
++                            if os.path.samefile(os.path.abspath(expanded_word), f):
++                                read_only_matched.append(f)
++                        except (FileNotFoundError, OSError):
++                            continue
++
++                    for matched_file in read_only_matched:
++                        self.abs_read_only_fnames.remove(matched_file)
++                        self.io.tool_output(f"[-] Auto-dropped read-only file {matched_file}")
++                        state_changed = True
++
++                matched_files = [
++                    self.get_rel_fname(f) for f in self.abs_fnames if expanded_word in f
++                ]
++                if not matched_files:
++                    matched_files.append(expanded_word)
++
++                for matched_file in matched_files:
++                    abs_fname = self.abs_root_path(matched_file)
++                    if abs_fname in self.abs_fnames:
++                        self.abs_fnames.remove(abs_fname)
++                        self.io.tool_output(f"[-] Auto-dropped {matched_file}")
++                        state_changed = True
++
++        # ==========================================
++        # 2. STRICT AUTO-ADD: Extract <file_request>
++        # ==========================================
++        req_match = re.search(r'<file_request>(.*?)</file_request>', content, re.DOTALL)
++        if not req_match:
++            return state_changed
++
++        # Replace backticks and quotes to easily parse space-separated paths
++        raw_req_content = req_match.group(1).replace('`', ' ').replace('"', ' ').replace("'", ' ')
++        req_paths = [p.strip() for p in raw_req_content.split() if p.strip()]
++
++        # ==========================================
++        # 3. ROUTER: Existence only
++        # ==========================================
++        for path_str in req_paths:
++            abs_path = self.abs_root_path(path_str)
++            path_obj = Path(abs_path)
++
++            # Skip if already in context
++            if abs_path in self.abs_fnames:
++                continue
++
++            # Condition A: File exists
++            if path_obj.exists():
++                self.abs_fnames.add(abs_path)
++                self.io.tool_output(f"[+] Auto-added existing file: {path_str}")
++                state_changed = True
++                continue
++
++            # Non-existent files are intentionally NOT created here anymore.
++            # Creation safety is handled cleanly inside Aider's `allowed_to_edit` hook,
++            # which is only triggered after a valid search/replace edit block has been parsed.
++        return state_changed
+\ No newline at end of file
+diff --git a/aider/coders/base_prompts.py b/aider/coders/base_prompts.py
+index 36f991f1e..130113304 100644
+--- a/aider/coders/base_prompts.py
++++ b/aider/coders/base_prompts.py
+@@ -2,59 +2,66 @@ class CoderPrompts:
+     system_reminder = ""
+ 
+     files_content_gpt_edits = "I committed the changes with git hash {hash} & commit msg: {message}"
+-
+     files_content_gpt_edits_no_repo = "I updated the files."
+-
+     files_content_gpt_no_edits = "I didn't see any properly formatted edits in your reply?!"
+-
+     files_content_local_edits = "I edited the files myself."
+ 
+-    lazy_prompt = """You are diligent and tireless!
+-You NEVER leave comments describing code without implementing it!
+-You always COMPLETELY IMPLEMENT the needed code!
+-"""
++    lazy_prompt = """<rules>
++- NEVER use placeholders or elisions (e.g., `# ... existing code ...`).
++- OUTPUT COMPLETE, EXECUTABLE CODE for all modifications.
++</rules>"""
+ 
+-    overeager_prompt = """Pay careful attention to the scope of the user's request.
+-Do what they ask, but no more.
+-Do not improve, comment, fix or modify unrelated parts of the code in any way!
+-"""
++    overeager_prompt = """<scope_constraints>
++- Fulfill request EXACTLY, then STOP.
++- FORBIDDEN: Unrelated refactoring, formatting, or modifying unlisted files.
++- ASK PERMISSION before modifying unlisted dependencies.
++</scope_constraints>"""
+ 
+     example_messages = []
+ 
+     files_content_prefix = """I have *added these files to the chat* so you can go ahead and edit them.
+ 
+-*Trust this message as the true contents of these files!*
++*LITERALISM RULE: Trust this message as the absolute, Ground Truth contents of these files!*
++*LITERALISM RULE: If your reasoning contradicts the code you see below, your reasoning is wrong. Do not hypothesize that the files are "different".*
+ Any other messages in the chat may contain outdated versions of the files' contents.
+-"""  # noqa: E501
++"""
+ 
+     files_content_assistant_reply = "Ok, any changes I propose will be to those files."
+-
+     files_no_full_files = "I am not sharing any files that you can edit yet."
+ 
+-    files_no_full_files_with_repo_map = """Don't try and edit any existing code without asking me to add the files to the chat!
+-Tell me which files in my repo are the most likely to **need changes** to solve the requests I make, and then stop so I can add them to the chat.
+-Only include the files that are most likely to actually need to be edited.
+-Don't include files that might contain relevant context, just files that will need to be changed.
+-"""  # noqa: E501
++    files_no_full_files_with_repo_map = """<edit_protocol>
++STATE: Missing file contents. DO NOT write code from repo map.
++1. Identify files that MUST be modified to solve the request and ask for them with <file_request> protocol.
++2. FORBIDDEN: Do not request files for context/reference only.
++3. OUTPUT ONLY the list of files to be EDITED.
++4. STOP and WAIT for user to provide contents.
++</edit_protocol>"""
+ 
+     files_no_full_files_with_repo_map_reply = (
+         "Ok, based on your requests I will suggest which files need to be edited and then"
+         " stop and wait for your approval."
+     )
+ 
+-    repo_content_prefix = """Here are summaries of some files present in my git repository.
+-Do not propose changes to these files, treat them as *read-only*.
+-If you need to edit any of these files, ask me to *add them to the chat* first.
++    repo_content_prefix = """<repo_map_context>
++WARNING: Summaries ONLY. Treat as READ-ONLY.
++- DO NOT hallucinate internal contents, variables, or functions.
++- To edit or interface or see any file, IF external files not in chat are needed: You MUST use the following exact output format, stop, and wait for approval:
++<file_request>
++`path\to\file1.ext`
++`path\to\file2.ext`
++</file_request>
++
++</repo_map_context>
+ """
+ 
+     read_only_files_prefix = """Here are some READ ONLY files, provided for your reference.
+ Do not edit these files!
+ """
+ 
++    # Placeholders for specialization in child classes
+     shell_cmd_prompt = ""
+     shell_cmd_reminder = ""
+     no_shell_cmd_prompt = ""
+     no_shell_cmd_reminder = ""
+-
+     rename_with_shell = ""
+-    go_ahead_tip = ""
++    go_ahead_tip = ""
+\ No newline at end of file
+diff --git a/aider/coders/context_prompts.py b/aider/coders/context_prompts.py
+index 3c71a2334..9b56592d8 100644
+--- a/aider/coders/context_prompts.py
++++ b/aider/coders/context_prompts.py
+@@ -1,75 +1,75 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class ContextPrompts(CoderPrompts):
+-    main_system = """Act as an expert code analyst.
+-Understand the user's question or request, solely to determine ALL the existing sources files which will need to be modified.
+-Return the *complete* list of files which will need to be modified based on the user's request.
+-Explain why each file is needed, including names of key classes/functions/methods/variables.
+-Be sure to include or omit the names of files already added to the chat, based on whether they are actually needed or not.
+-
+-The user will use every file you mention, regardless of your commentary.
+-So *ONLY* mention the names of relevant files.
+-If a file is not relevant DO NOT mention it.
+-
+-Only return files that will need to be modified, not files that contain useful/relevant functions.
+-
+-You are only to discuss EXISTING files and symbols.
+-Only return existing files, don't suggest the names of new files or functions that we will need to create.
+-
++    main_system = """<role>Expert Code Analyst</role>
++<task>
++Analyze the user's request to determine ALL existing source files that MUST be modified.
+ Always reply to the user in {language}.
+-
+-Be concise in your replies.
+-Return:
+-1. A bulleted list of files the will need to be edited, and symbols that are highly relevant to the user's request.
+-2. A list of classes/functions/methods/variables that are located OUTSIDE those files which will need to be understood. Just the symbols names, *NOT* file names.
+-
+-# Your response *MUST* use this format:
+-
++</task>
++
++<rules>
++- ONLY list files requiring modification.
++- Explain WHY each file is needed (include key classes/functions/methods/variables).
++- List required external symbols (classes/functions) located OUTSIDE the modified files.
++- The user will execute modifications on EVERY file you list; inaccurate additions will cause breaking changes.
++- Conciseness is mandatory.
++</rules>
++
++<forbidden>
++- DO NOT list files that are only needed for context/reference.
++- DO NOT suggest creating new files or functions.
++- DO NOT discuss non-existent files or symbols.
++</forbidden>
++
++<output_format>
+ ## ALL files we need to modify, with their relevant symbols:
+-
+-- alarms/buzz.py
+-  - `Buzzer` class which can make the needed sound
+-  - `Buzzer.buzz_buzz()` method triggers the sound
+-- alarms/time.py
+-  - `Time.set_alarm(hour, minute)` to set the alarm
++- path/to/file.py
++  - `ClassName` reason for modification
++  - `MethodName()` reason for modification
+ 
+ ## Relevant symbols from OTHER files:
+-
+-- AlarmManager class for setup/teardown of alarms
+-- SoundFactory will be used to create a Buzzer
+-"""
++- ExternalClassName
++- external_function_name
++</output_format>"""
+ 
+     example_messages = []
+ 
+-    files_content_prefix = """These files have been *added these files to the chat* so we can see all of their contents.
+-*Trust this message as the true contents of the files!*
+-Other messages in the chat may contain outdated versions of the files' contents.
+-"""  # noqa: E501
++    files_content_prefix = """<system_state>
++STATUS: Active File Contents Loaded.
++RULE: Treat the following file contents as the absolute source of truth. Ignore any previous versions in the chat history.
++</system_state>"""  # noqa: E501
+ 
+-    files_content_assistant_reply = (
+-        "Ok, I will use that as the true, current contents of the files."
+-    )
++    files_content_assistant_reply = """<ack>Acknowledged. Active file contents loaded as source of truth.</ack>"""
+ 
+-    files_no_full_files = "I am not sharing the full contents of any files with you yet."
++    files_no_full_files = """<system_state>
++STATUS: No full files currently loaded.
++</system_state>"""
+ 
+     files_no_full_files_with_repo_map = ""
+     files_no_full_files_with_repo_map_reply = ""
+ 
+-    repo_content_prefix = """I am working with you on code in a git repository.
+-Here are summaries of some files present in my git repo.
+-If you need to see the full contents of any files to answer my questions, ask me to *add them to the chat*.
+-"""
++    repo_content_prefix = """<repo_map_context>
++STATE: Git Repository Summaries.
++WARNING: These are summaries ONLY. Treat as READ-ONLY.
++- DO NOT hallucinate internal contents, variables, or functions.
++- Suggesting a file from these summaries requires an explicit request to add it to the chat.
++</repo_map_context>"""
++
++    system_reminder = """<critical_system_boundary>
++STRICTLY FORBIDDEN: Generating, modifying, or outputting any source code.
++Your ONLY task is context analysis.
++</critical_system_boundary>"""
+ 
+-    system_reminder = """
+-NEVER RETURN CODE!
+-"""
++    try_again = """<validation_protocol>
++STATE: Chat files updated.
++TASK: Evaluate the current set of chat files against the user's request.
+ 
+-    try_again = """I have updated the set of files added to the chat.
+-Review them to decide if this is the correct set of files or if we need to add more or remove files.
++IF the current set is perfectly accurate:
++- Output the EXACT current list using the mandatory <output_format>.
+ 
+-If this is the right set, just return the current list of files.
+-Or return a smaller or larger set of files which need to be edited, with symbols that are highly relevant to the user's request.
+-"""
++IF the set needs adjustment (additions/removals):
++- Output the NEW, corrected list using the mandatory <output_format>.
++</validation_protocol>"""
+diff --git a/aider/coders/editblock_coder.py b/aider/coders/editblock_coder.py
+index 37d40d97c..7ef058bb9 100644
+--- a/aider/coders/editblock_coder.py
++++ b/aider/coders/editblock_coder.py
+@@ -47,31 +47,61 @@ class EditBlockCoder(Coder):
+             path, original, updated = edit
+             full_path = self.abs_root_path(path)
+             new_content = None
++            tcpe_error = None
++
++            # --- NEW: IDEMPOTENT EDIT GUARD ---
++            if original.strip() and original.strip() == updated.strip():
++                tcpe_error = "[SYSTEM LOG: Edit aborted. Your SEARCH block is exactly identical to your REPLACE block. You made absolutely zero changes to the code. You must write new/modified code in the REPLACE block to fix the failing tests.]"
++                failed.append((path, original, updated, tcpe_error))
++                if not dry_run:
++                    self.tcpe.track_failed_block(path, updated)
++                continue
++            # ----------------------------------
+ 
+             if Path(full_path).exists():
+                 content = self.io.read_text(full_path)
+                 new_content = do_replace(full_path, content, original, updated, self.fence)
+ 
++                if new_content and not dry_run:
++                    is_safe, tcpe_error = self.tcpe.check_anti_doublon(new_content, path)
++                    if not is_safe:
++                        new_content = None
++
+             # If the edit failed, and
+             # this is not a "create a new file" with an empty original...
+             # https://github.com/Aider-AI/aider/issues/2258
+-            if not new_content and original.strip():
++            if not new_content and original.strip() and not tcpe_error:
+                 # try patching any of the other files in the chat
+-                for full_path in self.abs_fnames:
+-                    content = self.io.read_text(full_path)
+-                    new_content = do_replace(full_path, content, original, updated, self.fence)
+-                    if new_content:
+-                        path = self.get_rel_fname(full_path)
++                for f in self.abs_fnames:
++                    content = self.io.read_text(f)
++                    nc = do_replace(f, content, original, updated, self.fence)
++                    if nc:
++                        if not dry_run:
++                            is_safe, t_err = self.tcpe.check_anti_doublon(nc, f)
++                            if not is_safe:
++                                tcpe_error = t_err
++                                break
++                        new_content = nc
++                        path = self.get_rel_fname(f)
++                        full_path = f
+                         break
+ 
+             updated_edits.append((path, original, updated))
+ 
+             if new_content:
+                 if not dry_run:
++                    modified_symbols = self.tcpe.extract_modified_symbols(path, content if content else "", new_content)
+                     self.io.write_text(full_path, new_content)
++                    
++                    self.tcpe.process_successful_edit(path, updated)
++                    self.partial_response_content = self.tcpe.scrub_message(
++                        self.partial_response_content, path, modified_symbols, original, updated
++                    )
+                 passed.append(edit)
+             else:
+-                failed.append(edit)
++                failed.append((path, original, updated, tcpe_error))
++                if not dry_run and not tcpe_error:
++                    self.tcpe.track_failed_block(path, updated)
+ 
+         if dry_run:
+             return updated_edits
+@@ -83,7 +113,11 @@ class EditBlockCoder(Coder):
+ 
+         res = f"# {len(failed)} SEARCH/REPLACE {blocks} failed to match!\n"
+         for edit in failed:
+-            path, original, updated = edit
++            path, original, updated, tcpe_err = edit
++
++            if tcpe_err:
++                res += f"\n{tcpe_err}\n<<<<<<< SEARCH\n{original}=======\n{updated}>>>>>>> REPLACE\n\n"
++                continue
+ 
+             full_path = self.abs_root_path(path)
+             content = self.io.read_text(full_path)
+diff --git a/aider/coders/editblock_func_prompts.py b/aider/coders/editblock_func_prompts.py
+index c7f18b868..115ccb1c3 100644
+--- a/aider/coders/editblock_func_prompts.py
++++ b/aider/coders/editblock_func_prompts.py
+@@ -1,27 +1,40 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class EditBlockFunctionPrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-Once you understand the request you MUST use the `replace_lines` function to edit the files to make the needed changes.
+-"""
+-
+-    system_reminder = """
+-ONLY return code using the `replace_lines` function.
+-NEVER return code outside the `replace_lines` function.
+-"""
+-
+-    files_content_prefix = "Here is the current content of the files:\n"
+-    files_no_full_files = "I am not sharing any files yet."
+-
+-    redacted_edit_message = "No changes are needed."
+-
+-    repo_content_prefix = (
+-        "Below here are summaries of other files! Do not propose changes to these *read-only*"
+-        " files without asking me first.\n"
+-    )
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Execute requested changes to the supplied code using the mandatory tool.
++</task>
++
++<execution_protocol>
++1. Analyze the user request.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: You MUST use the `replace_lines` function to modify the files.
++</execution_protocol>"""
++
++    system_reminder = """<critical_system_boundary>
++STRICTLY FORBIDDEN: Outputting code as plain text or standard markdown blocks.
++MANDATORY: You MUST ONLY return code by executing the `replace_lines` function.
++</critical_system_boundary>"""
++
++    files_content_prefix = """<system_state>
++STATUS: Active File Contents Loaded.
++RULE: Treat the following file contents as the absolute source of truth.
++</system_state>\n"""
++
++    files_no_full_files = """<system_state>
++STATUS: No full files currently loaded.
++</system_state>"""
++
++    redacted_edit_message = """<status>No changes required for this block.</status>"""
++
++    repo_content_prefix = """<repo_map_context>
++STATE: Git Repository Summaries.
++WARNING: These are summaries ONLY. Treat as READ-ONLY.
++- DO NOT hallucinate internal contents, variables, or functions.
++- To propose changes to these files, you MUST explicitly ask to add them to the chat first.
++- STRICTLY FORBIDDEN: Do not use `replace_lines` on files in this summary list.
++</repo_map_context>\n"""
+diff --git a/aider/coders/editblock_prompts.py b/aider/coders/editblock_prompts.py
+index fc494af4f..79ba0ed3d 100644
+--- a/aider/coders/editblock_prompts.py
++++ b/aider/coders/editblock_prompts.py
+@@ -1,33 +1,40 @@
+ # flake8: noqa: E501
+-
+ from . import shell
+ from .base_prompts import CoderPrompts
+ 
+-
+ class EditBlockPrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-Always use best practices when coding.
+-Respect and use existing conventions, libraries, etc that are already present in the code base.
++    main_system = """
++<task>
++Execute code changes using SEARCH/REPLACE blocks based on user requests.
++Always respect existing conventions/libraries.
+ {final_reminders}
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-Once you understand the request you MUST:
+-
+-1. Decide if you need to propose *SEARCH/REPLACE* edits to any files that haven't been added to the chat. You can create new files without asking!
+-
+-But if you need to propose edits to existing files not already added to the chat, you *MUST* tell the user their full path names and ask them to *add the files to the chat*.
+-End your reply and wait for their approval.
+-You can keep asking if you then decide you need to edit more files.
+-
+-2. Think step-by-step and explain the needed changes in a few short sentences.
++</task>
++
++<execution_protocol>
++1. **Ambiguity Check:** Infer implementation details autonomously. STOP and ASK ONLY if a request triggers a systemic "blast radius" (e.g., altering core architecture, security boundaries, or adding new dependencies).
++2. IF external files not in chat are needed: You MUST use the following exact output format, stop, and wait for approval:
++<file_request>
++`path\to\file1.ext`
++`path\to\file2.ext`
++</file_request>
++3. IF a file in the chat is no longer relevant to your current task, you MUST drop it to free up context space. Use the exact format below, then immediately proceed with your next step without waiting for approval:
++<file_drop>
++`path\to\filename.py`
++`path\to\filename2.py`
++</file_drop>
++4. **Action Plan:** Provide a concise `<action_plan>` summarizing changes and their "Scope".
++5. **Surgical Precision:** Describe each change using a *SEARCH/REPLACE block*.
++</execution_protocol>
++
++<prohibitions>
++- NO IDENTITY BLOCKS: SEARCH and REPLACE sections MUST NOT be identical.
++- NO STANDARD MARKDOWN: ONLY use SEARCH/REPLACE blocks for code edits.
++- NO LAZY COPYING: Do not include large blocks of unchanged code (Lazy Copy Anti-Pattern).
++</prohibitions>
+ 
+-3. Describe each change with a *SEARCH/REPLACE block* per the examples below.
+-
+-All changes to files must use this *SEARCH/REPLACE block* format.
+-ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
+ {shell_cmd_prompt}
+ """
++
+     example_messages = [
+         dict(
+             role="user",
+@@ -35,19 +42,19 @@ ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
+         ),
+         dict(
+             role="assistant",
+-            content="""To make this change we need to modify `mathweb/flask/app.py` to:
+-
+-1. Import the math package.
+-2. Remove the existing factorial() function.
+-3. Update get_factorial() to call math.factorial instead.
+-
+-Here are the *SEARCH/REPLACE* blocks:
++            content="""<action_plan>
++1. Import math in `mathweb/flask/app.py`.
++2. Remove custom factorial() and update get_factorial() to use math.factorial.
++Scope: Localized edits.
++</action_plan>
+ 
+ mathweb/flask/app.py
+ {fence[0]}python
+ <<<<<<< SEARCH
++import os
+ from flask import Flask
+ =======
++import os
+ import math
+ from flask import Flask
+ >>>>>>> REPLACE
+@@ -71,102 +78,56 @@ def factorial(n):
+ mathweb/flask/app.py
+ {fence[0]}python
+ <<<<<<< SEARCH
++def get_factorial(n):
++    # Validates input first
+     return str(factorial(n))
+ =======
++def get_factorial(n):
++    # Validates input first
+     return str(math.factorial(n))
+ >>>>>>> REPLACE
+ {fence[1]}
+ """,
+-        ),
+-        dict(
+-            role="user",
+-            content="Refactor hello() into its own file.",
+-        ),
+-        dict(
+-            role="assistant",
+-            content="""To make this change we need to modify `main.py` and make a new file `hello.py`:
+-
+-1. Make a new hello.py file with hello() in it.
+-2. Remove hello() from main.py and replace it with an import.
+-
+-Here are the *SEARCH/REPLACE* blocks:
+-
+-hello.py
+-{fence[0]}python
+-<<<<<<< SEARCH
+-=======
+-def hello():
+-    "print a greeting"
+-
+-    print("hello")
+->>>>>>> REPLACE
+-{fence[1]}
+-
+-main.py
+-{fence[0]}python
+-<<<<<<< SEARCH
+-def hello():
+-    "print a greeting"
+-
+-    print("hello")
+-=======
+-from hello import hello
+->>>>>>> REPLACE
+-{fence[1]}
+-""",
+-        ),
++        )
+     ]
+ 
+-    system_reminder = """# *SEARCH/REPLACE block* Rules:
+-
+-Every *SEARCH/REPLACE block* must use this format:
+-1. The *FULL* file path alone on a line, verbatim. No bold asterisks, no quotes around it, no escaping of characters, etc.
+-2. The opening fence and code language, eg: {fence[0]}python
+-3. The start of search block: <<<<<<< SEARCH
+-4. A contiguous chunk of lines to search for in the existing source code
+-5. The dividing line: =======
+-6. The lines to replace into the source code
+-7. The end of the replace block: >>>>>>> REPLACE
+-8. The closing fence: {fence[1]}
++    system_reminder = """<search_replace_rules>
++MANDATORY FORMAT:
++1. FULL FILE PATH: Alone on a line.
++2. OPENING FENCE: {fence[0]}code_language
++3. SEARCH HEADER: <<<<<<< SEARCH
++4. SEARCH CONTENT: Exact match. Include container markup/escapes for JSON/XML.
++5. DIVIDER: =======
++6. REPLACE CONTENT: The updated code.
++7. REPLACE FOOTER: >>>>>>> REPLACE
++8. CLOSING FENCE: {fence[1]}
++
++<surgical_precision_guidelines>
++- Include ONLY modifications plus 2-4 lines of context for uniqueness.
++- MOVING CODE: Use 2 blocks (1 delete, 1 insert).
++- NEW FILES: SEARCH section MUST be empty.
++- UNIQUE MATCHING: Include enough lines in SEARCH to uniquely match the target.
++</surgical_precision_guidelines>
+ 
+-Use the *FULL* file path, as shown to you by the user.
+ {quad_backtick_reminder}
+-Every *SEARCH* section must *EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, etc.
+-If the file contains code or other data wrapped/escaped in json/xml/quotes or other containers, you need to propose edits to the literal contents of the file, including the container markup.
++</search_replace_rules>
+ 
+-*SEARCH/REPLACE* blocks will *only* replace the first match occurrence.
+-Including multiple unique *SEARCH/REPLACE* blocks if needed.
+-Include enough lines in each SEARCH section to uniquely match each set of lines that need to change.
++<shell_command_protocol>
++{rename_with_shell}
++{go_ahead_tip}
++</shell_command_protocol>
+ 
+-Keep *SEARCH/REPLACE* blocks concise.
+-Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file.
+-Include just the changing lines, and a few surrounding lines if needed for uniqueness.
+-Do not include long runs of unchanging lines in *SEARCH/REPLACE* blocks.
+-
+-Only create *SEARCH/REPLACE* blocks for files that the user has added to the chat!
+-
+-To move code within a file, use 2 *SEARCH/REPLACE* blocks: 1 to delete it from its current location, 1 to insert it in the new location.
+-
+-Pay attention to which filenames the user wants you to edit, especially if they are asking you to create a new file.
+-
+-If you want to put code in a new file, use a *SEARCH/REPLACE block* with:
+-- A new file path, including dir name if needed
+-- An empty `SEARCH` section
+-- The new file's contents in the `REPLACE` section
+-
+-{rename_with_shell}{go_ahead_tip}{final_reminders}ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
++<critical_boundary>
++STRICTLY FORBIDDEN: Code outside SEARCH/REPLACE blocks.
++REQUIRED: Shell commands in `bash` block at the ABSOLUTE end.
++{final_reminders}
+ {shell_cmd_reminder}
++</critical_boundary>
+ """
+ 
+-    rename_with_shell = """To rename files which have been added to the chat, use shell commands at the end of your response.
+-
+-"""
+-
+-    go_ahead_tip = """If the user just says something like "ok" or "go ahead" or "do that" they probably want you to make SEARCH/REPLACE blocks for the code changes you just proposed.
+-The user will say when they've applied your edits. If they haven't explicitly confirmed the edits have been applied, they probably want proper SEARCH/REPLACE blocks.
+-
+-"""
++    rename_with_shell = "RENAME RULE: To rename files, use shell commands in the final bash block.\n"
++    go_ahead_tip = "APPROVAL RULE: If user says 'ok', 'go ahead', 'go on', or 'do that', it means keep working on the previous task if it's not finished.\n"
+ 
+     shell_cmd_prompt = shell.shell_cmd_prompt
+     no_shell_cmd_prompt = shell.no_shell_cmd_prompt
+-    shell_cmd_reminder = shell.shell_cmd_reminder
++    shell_cmd_reminder = shell.shell_cmd_reminder
+\ No newline at end of file
+diff --git a/aider/coders/editor_editblock_prompts.py b/aider/coders/editor_editblock_prompts.py
+index 0ec36b47f..f06f26cba 100644
+--- a/aider/coders/editor_editblock_prompts.py
++++ b/aider/coders/editor_editblock_prompts.py
+@@ -1,14 +1,31 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .editblock_prompts import EditBlockPrompts
+ 
+ 
+ class EditorEditBlockPrompts(EditBlockPrompts):
+-    main_system = """Act as an expert software developer who edits source code.
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Take requests for changes to the supplied code and execute them using the SEARCH/REPLACE tool.
++Always use best practices when coding.
++</task>
++
++<execution_protocol>
++1. Analyze user request and respect existing conventions/libraries.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: Describe each change and execute it using a *SEARCH/REPLACE block* per the examples below.
++</execution_protocol>
++
++<format_rules>
++- All changes to files MUST be formatted as a *SEARCH/REPLACE block*.
++- Use the exact syntax demonstrated in the examples below.
++</format_rules>
++
++<critical_system_boundary>
++STRICTLY FORBIDDEN: Outputting code in standard markdown blocks or plain text.
++MANDATORY: You MUST ONLY return code enclosed within a valid *SEARCH/REPLACE block*.
+ {final_reminders}
+-Describe each change with a *SEARCH/REPLACE block* per the examples below.
+-All changes to files must use this *SEARCH/REPLACE block* format.
+-ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
++</critical_system_boundary>
+ """
+ 
+     shell_cmd_prompt = ""
+diff --git a/aider/coders/editor_whole_prompts.py b/aider/coders/editor_whole_prompts.py
+index 39bc38f64..a7ed03129 100644
+--- a/aider/coders/editor_whole_prompts.py
++++ b/aider/coders/editor_whole_prompts.py
+@@ -1,10 +1,24 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .wholefile_prompts import WholeFilePrompts
+ 
+ 
+ class EditorWholeFilePrompts(WholeFilePrompts):
+-    main_system = """Act as an expert software developer and make changes to source code.
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Take requests for changes to the supplied code.
++Always use best practices when coding.
++</task>
++
++<execution_protocol>
++1. Analyze user request and respect existing conventions/libraries.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: Execute requested changes by outputting a completely updated copy of each file that needs modification.
++</execution_protocol>
++
++<critical_system_boundary>
++STRICTLY FORBIDDEN: Do NOT use placeholders, elisions, or comments to represent existing code (e.g., `// ... existing code ...`).
++MANDATORY: You MUST output the ENTIRE, complete, and runnable content for any modified file. Failure to output the full file will corrupt the user's system.
++</critical_system_boundary>
+ {final_reminders}
+-Output a copy of each file that needs changes.
+ """
+diff --git a/aider/coders/patch_prompts.py b/aider/coders/patch_prompts.py
+index 66832ee16..7d12cfdb7 100644
+--- a/aider/coders/patch_prompts.py
++++ b/aider/coders/patch_prompts.py
+@@ -1,5 +1,5 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ from .editblock_prompts import EditBlockPrompts
+ 
+@@ -8,48 +8,42 @@ class PatchPrompts(EditBlockPrompts):
+     # --------------------------------------------------------------------- #
+     #  SYSTEM PROMPT
+     # --------------------------------------------------------------------- #
+-    main_system = """Act as an expert software developer.
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Take requests for changes to the supplied code.
++Execute requested changes using the V4A patch format.
+ Always use best practices when coding.
+-Respect and use existing conventions, libraries, etc that are already present in the code base.
++</task>
++
++<execution_protocol>
++1. Analyze user request and respect existing conventions/libraries.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF external files not in chat are needed: OUTPUT their full paths and ASK user to add them. End your reply and wait for approval. (You can keep asking later if more files are needed. You may create new files without asking).
++4. IF request is clear: Think step-by-step and explain the needed changes in a few short sentences using an `<action_plan>`.
++5. Generate the exact changes using the V4A diff format within `*** Begin Patch` and `*** End Patch` markers.
++6. CONSOLIDATE: Each file MUST appear only once. All edits for a file go into a single `*** [ACTION] File:` block.
++</execution_protocol>
+ {final_reminders}
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-Once you understand the request you MUST:
+-
+-1. Decide if you need to propose edits to any files that haven't been added to the chat. You can create new files without asking!
+-
+-   • If you need to propose edits to existing files not already added to the chat, you *MUST* tell the user their full path names and ask them to *add the files to the chat*.
+-   • End your reply and wait for their approval.
+-   • You can keep asking if you then decide you need to edit more files.
+-
+-2. Think step‑by‑step and explain the needed changes in a few short sentences.
+-
+-3. Describe the changes using the V4A diff format, enclosed within `*** Begin Patch` and `*** End Patch` markers.
+-
+-IMPORTANT: Each file MUST appear only once in the patch.
+-Consolidate **all** edits for a given file into a single `*** [ACTION] File:` block.
+ {shell_cmd_prompt}
+ """
+ 
++
+     # --------------------------------------------------------------------- #
+     #  EXAMPLE MESSAGES
+     # --------------------------------------------------------------------- #
+     example_messages = [
+-        # --- Example 1 ---------------------------------------------------- #
+-        dict(
+-            role="user",
+-            content="Change get_factorial() to use math.factorial",
+-        ),
+-        dict(
+-            role="assistant",
+-            content="""To make this change we need to modify `mathweb/flask/app.py`:
+-
++    # --- Example 1 ---------------------------------------------------- #
++    dict(
++        role="user",
++        content="Change get_factorial() to use math.factorial",
++    ),
++    dict(
++        role="assistant",
++        content="""<action_plan>
+ 1. Import the `math` module.
+ 2. Replace the custom recursive `factorial()` helper with `math.factorial`.
+ 3. Update `get_factorial()` to call `math.factorial`.
+-
+-Here is the patch:
++</action_plan>
+ 
+ *** Begin Patch
+ *** Update File: mathweb/flask/app.py
+@@ -76,20 +70,18 @@ Here is the patch:
+ +    return str(math.factorial(n))
+ *** End Patch
+ """,
+-        ),
+-        # --- Example 2 ---------------------------------------------------- #
+-        dict(
+-            role="user",
+-            content="Refactor hello() into its own file.",
+-        ),
+-        dict(
+-            role="assistant",
+-            content="""To make this change we need to modify `main.py` and create a new file `hello.py`:
+-
++    ),
++    # --- Example 2 ---------------------------------------------------- #
++    dict(
++        role="user",
++        content="Refactor hello() into its own file.",
++    ),
++    dict(
++        role="assistant",
++        content="""<action_plan>
+ 1. Create `hello.py` with the `hello()` function.
+ 2. Remove `hello()` from `main.py` and import it instead.
+-
+-Here is the patch:
++</action_plan>
+ 
+ *** Begin Patch
+ *** Add File: hello.py
+@@ -113,47 +105,27 @@ Here is the patch:
+     # --------------------------------------------------------------------- #
+     #  SYSTEM REMINDER
+     # --------------------------------------------------------------------- #
+-    system_reminder = """# V4A Diff Format Rules:
+-
+-Your entire response containing the patch MUST start with `*** Begin Patch` on a line by itself.
+-Your entire response containing the patch MUST end with `*** End Patch` on a line by itself.
+-
+-Use the *FULL* file path, as shown to you by the user.
++    system_reminder = """<v4a_format_rules>
++MANDATORY FORMAT: Strict V4A Diff format.
++
++1. BOUNDARIES: Entire patch MUST be enclosed by `*** Begin Patch` and `*** End Patch` on their own lines.
++2. FILE MARKER: Start each file's changes with `*** [ACTION] File: [full/path/to/file]` (Actions: Add, Update, Delete).
++3. SINGLE BLOCK PER FILE: Each file MUST appear ONLY ONCE. Consolidate all changes for a file under its single `Update File` marker.
++4. MOVING CODE: When moving code within a single file, keep everything inside one `*** Update File:` block. Provide one hunk that deletes the code from its original location and another hunk that inserts it at the new location.
++5. CONTEXT LINES (Update): Provide exactly 3 lines of unchanged context before and after changes. Prefix context lines with a single space ` `.
++6. DELETIONS/ADDITIONS: Prefix removed lines with `-`. Prefix added lines with `+`.
++7. EXACT MATCH: Context lines and indentation MUST match the original file character-for-character. Less than 3 lines allowed only at the extreme start/end of a file.
++8. SCOPE MARKERS: If 3 lines of context is insufficient, use `@@ [CLASS_OR_FUNCTION_NAME]` on its own line before context lines. No line numbers.
++9. NEW FILES (Add): Prefix all lines of the new file with `+`.
++10. DELETE FILES (Delete): No content lines needed after the marker.
++11. VALID TARGETS: Only create patches for files the user has actively added to the chat.
+ {quad_backtick_reminder}
++</v4a_format_rules>
+ 
+-For each file you need to modify, start with a marker line:
+-
+-    *** [ACTION] File: [path/to/file]
+-
+-Where `[ACTION]` is one of `Add`, `Update`, or `Delete`.
+-
+-⇨ **Each file MUST appear only once in the patch.**  
+-   Consolidate all changes for that file into the same block.  
+-   If you are moving code within a file, include both the deletions and the
+-   insertions as separate hunks inside this single `*** Update File:` block
+-   (do *not* open a second block for the same file).
+-
+-For `Update` actions, describe each snippet of code that needs to be changed using the following format:
+-1. Context lines: Include 3 lines of context *before* the change. These lines MUST start with a single space ` `.
+-2. Lines to remove: Precede each line to be removed with a minus sign `-`.
+-3. Lines to add: Precede each line to be added with a plus sign `+`.
+-4. Context lines: Include 3 lines of context *after* the change. These lines MUST start with a single space ` `.
+-
+-Context lines MUST exactly match the existing file content, character for character, including indentation.
+-If a change is near the beginning or end of the file, include fewer than 3 context lines as appropriate.
+-If 3 lines of context is insufficient to uniquely identify the snippet, use `@@ [CLASS_OR_FUNCTION_NAME]` markers on their own lines *before* the context lines to specify the scope. You can use multiple `@@` markers if needed.
+-Do not include line numbers.
+-
+-Only create patches for files that the user has added to the chat!
+-
+-When moving code *within* a single file, keep everything inside one
+-`*** Update File:` block. Provide one hunk that deletes the code from its
+-original location and another hunk that inserts it at the new location.
+-
+-For `Add` actions, use the `*** Add File: [path/to/new/file]` marker, followed by the lines of the new file, each preceded by a plus sign `+`.
+-
+-For `Delete` actions, use the `*** Delete File: [path/to/file]` marker. No other lines are needed for the deletion.
+-
+-{rename_with_shell}{go_ahead_tip}{final_reminders}ONLY EVER RETURN CODE IN THE SPECIFIED V4A DIFF FORMAT!
++<critical_system_boundary>
++STRICTLY FORBIDDEN: Returning code in any format other than the specified V4A Diff format.
++WARNING: Context lines MUST perfectly match existing files. Do not create multiple action blocks for the same file. Failure to strictly follow these formatting rules will result in patch application failure.
++{rename_with_shell}{go_ahead_tip}{final_reminders}
+ {shell_cmd_reminder}
++</critical_system_boundary>
+ """
+diff --git a/aider/coders/shell.py b/aider/coders/shell.py
+index 2e3753a4d..65dc1cadd 100644
+--- a/aider/coders/shell.py
++++ b/aider/coders/shell.py
+@@ -1,5 +1,5 @@
+ shell_cmd_prompt = """
+-4. *Concisely* suggest any shell commands the user might want to run in ```bash blocks.
++4. SHELL RULE: *Concisely* suggest shell commands in a single ```bash block at the end of your response.
+ 
+ Just suggest shell commands this way, not example code.
+ Only suggest complete shell commands that are ready to execute, without placeholders.
+@@ -9,29 +9,22 @@ All shell commands will run from the root directory of the user's project.
+ 
+ Use the appropriate shell based on the user's system info:
+ {platform}
+-Examples of when to suggest shell commands:
++"""
++shell_cmd_reminder = """
++SHELL EXECUTION: All executable commands MUST be enclosed in a code block using the `bash` language identifier at the absolute end of the response:
++```bash
++[commands]
++```
+ 
+-- If you changed a self-contained html file, suggest an OS-appropriate command to open a browser to view it to see the updated content.
+-- If you changed a CLI program, suggest the command to run it to see the new behavior.
+-- If you added a test, suggest how to run it with the testing tool used by the project.
+-- Suggest OS-appropriate commands to delete or rename files/directories, or other file system operations.
+-- If your code changes add new dependencies, suggest the command to install them.
+-- Etc.
+-"""  # noqa
++Examples of when to suggest shell commands:
++- HTML view: If you changed a self-contained html file, suggest an OS-appropriate command to open a browser.
++- CLI programs: If you changed a CLI program, suggest the command to run it to verify behavior.
++- Tests: If you added a test, suggest the command for the project's specific testing tool.
++- File ops: Suggest OS-appropriate commands to delete or rename files/directories.
++- Dependencies: If your changes add new dependencies, suggest the command to install them.
++"""
+ 
+ no_shell_cmd_prompt = """
+ Keep in mind these details about the user's platform and environment:
+ {platform}
+-"""  # noqa
+-
+-shell_cmd_reminder = """
+-Examples of when to suggest shell commands:
+-
+-- If you changed a self-contained html file, suggest an OS-appropriate command to open a browser to view it to see the updated content.
+-- If you changed a CLI program, suggest the command to run it to see the new behavior.
+-- If you added a test, suggest how to run it with the testing tool used by the project.
+-- Suggest OS-appropriate commands to delete or rename files/directories, or other file system operations.
+-- If your code changes add new dependencies, suggest the command to install them.
+-- Etc.
+-
+-"""  # noqa
++"""
+\ No newline at end of file
+diff --git a/aider/coders/single_wholefile_func_prompts.py b/aider/coders/single_wholefile_func_prompts.py
+index f97a91be9..771fdf257 100644
+--- a/aider/coders/single_wholefile_func_prompts.py
++++ b/aider/coders/single_wholefile_func_prompts.py
+@@ -1,25 +1,35 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class SingleWholeFileFunctionPrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-Once you understand the request you MUST use the `write_file` function to update the file to make the changes.
+-"""
+-
+-    system_reminder = """
+-ONLY return code using the `write_file` function.
+-NEVER return code outside the `write_file` function.
+-"""
+-
+-    files_content_prefix = "Here is the current content of the file:\n"
+-    files_no_full_files = "I am not sharing any files yet."
+-
+-    redacted_edit_message = "No changes are needed."
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Execute requested changes to the supplied code using the mandatory file-writing tool.
++</task>
++
++<execution_protocol>
++1. Analyze the user request.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: You MUST use the `write_file` function to completely replace and update the file.
++</execution_protocol>"""
++
++    system_reminder = """<critical_system_boundary>
++STRICTLY FORBIDDEN: Outputting code as plain text or standard markdown blocks.
++MANDATORY: You MUST ONLY return code by executing the `write_file` function.
++</critical_system_boundary>"""
++
++    files_content_prefix = """<system_state>
++    STATUS: Active File Contents Loaded.
++    RULE: The following content is the absolute source of truth for the target file.
++    </system_state>\n"""
++
++    files_no_full_files = """<system_state>
++    STATUS: No file contents currently loaded.
++    </system_state>"""
++
++    redacted_edit_message = """<status>No changes required for this file.</status>"""
+ 
+     # TODO: should this be present for using this with gpt-4?
+     repo_content_prefix = None
+diff --git a/aider/coders/udiff_prompts.py b/aider/coders/udiff_prompts.py
+index 23d2d8f73..e4fedd0e3 100644
+--- a/aider/coders/udiff_prompts.py
++++ b/aider/coders/udiff_prompts.py
+@@ -1,35 +1,34 @@
+ # flake8: noqa: E501
+-
++#updated
+ from . import shell
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class UnifiedDiffPrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-{final_reminders}
+-Always use best practices when coding.
+-Respect and use existing conventions, libraries, etc that are already present in the code base.
+-
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-For each file that needs to be changed, write out the changes similar to a unified diff like `diff -U0` would produce.
+-"""
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Execute requested changes to the supplied code by producing unified diffs.
++</task>
+ 
++<execution_protocol>
++{final_reminders}
++1. Analyze the user request.
++2. Maintain existing conventions, libraries, and best practices.
++3. IF request is ambiguous: ASK clarifying questions and STOP.
++4. IF request is clear: For each modified file, generate a unified diff exactly matching `diff -U0` behavior.
++</execution_protocol>"""
+     example_messages = [
+-        dict(
+-            role="user",
+-            content="Replace is_prime with a call to sympy.",
+-        ),
+-        dict(
+-            role="assistant",
+-            content="""Ok, I will:
+-
+-1. Add an imports of sympy.
+-2. Remove the is_prime() function.
+-3. Replace the existing call to is_prime() with a call to sympy.isprime().
+-
+-Here are the diffs for those changes:
++    dict(
++        role="user",
++        content="Replace is_prime with a call to sympy.",
++    ),
++    dict(
++        role="assistant",
++        content="""<action_plan>
++1. Import sympy.
++2. Remove `is_prime()` function.
++3. Replace `is_prime()` calls with `sympy.isprime()`.
++</action_plan>
+ 
+ ```diff
+ --- mathweb/flask/app.py
+@@ -66,47 +65,32 @@ Here are the diffs for those changes:
+ +        if sympy.isprime(num):
+ +            count += 1
+ +    return str(num)
+-```
+ """,
+         ),
+     ]
+ 
+-    system_reminder = """# File editing rules:
+-
+-Return edits similar to unified diffs that `diff -U0` would produce.
+-
+-Make sure you include the first 2 lines with the file paths.
+-Don't include timestamps with the file paths.
+-
+-Start each hunk of changes with a `@@ ... @@` line.
+-Don't include line numbers like `diff -U0` does.
+-The user's patch tool doesn't need them.
+-
+-The user's patch tool needs CORRECT patches that apply cleanly against the current contents of the file!
+-Think carefully and make sure you include and mark all lines that need to be removed or changed as `-` lines.
+-Make sure you mark all new or modified lines with `+`.
+-Don't leave out any lines or the diff patch won't apply correctly.
+-
+-Indentation matters in the diffs!
+-
+-Start a new hunk for each section of the file that needs changes.
+-
+-Only output hunks that specify changes with `+` or `-` lines.
+-Skip any hunks that are entirely unchanging ` ` lines.
+-
+-Output hunks in whatever order makes the most sense.
+-Hunks don't need to be in any particular order.
+-
+-When editing a function, method, loop, etc use a hunk to replace the *entire* code block.
+-Delete the entire existing version with `-` lines and then add a new, updated version with `+` lines.
+-This will help you generate correct code and correct diffs.
+-
+-To move code within a file, use 2 hunks: 1 to delete it from its current location, 1 to insert it in the new location.
+-
+-To make a new file, show a diff from `--- /dev/null` to `+++ path/to/new/file.ext`.
+-
++    system_reminder = """<diff_format_rules>
++MANDATORY FORMAT: Strict `diff -U0` style patches.
++
++1. HEADER: Start with 2 file path lines (`---` and `+++`). NO timestamps.
++2. HUNK DELIMITER: Start each change hunk with `@@ ... @@`. NO line numbers.
++3. DELETIONS: Mark ALL removed or changed lines with `-`.
++4. ADDITIONS: Mark ALL new or modified lines with `+`.
++5. INDENTATION: Exact original indentation is strictly required.
++6. SEPARATION: Create a new hunk for each distinct section of changes.
++7. UNCHANGED HUNKS: Only output hunks that specify changes. Skip any hunks that are entirely unchanging (only ` ` prefix lines).
++8. BLOCK REPLACEMENT: When editing a function/method/loop, replace the ENTIRE block (delete all old lines with `-`, add new version with `+`).
++9. MOVING CODE: Use 2 hunks (1 to delete from origin, 1 to insert at destination).
++10. NEW FILES: Header must be `--- /dev/null` to `+++ path/to/new/file.ext`.
++11. HUNK ORDER: Output hunks in whatever order makes the most sense. They do not need to be sequential.
++</diff_format_rules>
++
++<critical_system_boundary>
++WARNING: Precision is absolute. Think carefully and make sure you include and mark ALL lines that need to be removed or changed.
++DO NOT leave out any lines or the diff patch will fail to apply cleanly against the user's file.
++Missing a single `-` or `+` line, or failing to match existing indentation, is a system failure.
+ {final_reminders}
+-"""
++</critical_system_boundary>"""
+ 
+     shell_cmd_prompt = shell.shell_cmd_prompt
+     no_shell_cmd_prompt = shell.no_shell_cmd_prompt
+diff --git a/aider/coders/udiff_simple_prompts.py b/aider/coders/udiff_simple_prompts.py
+index cd3160e58..4f9846baa 100644
+--- a/aider/coders/udiff_simple_prompts.py
++++ b/aider/coders/udiff_simple_prompts.py
+@@ -1,3 +1,4 @@
++#updated
+ from .udiff_prompts import UnifiedDiffPrompts
+ 
+ 
+@@ -10,16 +11,18 @@ class UnifiedDiffSimplePrompts(UnifiedDiffPrompts):
+ 
+     example_messages = []
+ 
+-    system_reminder = """# File editing rules:
++    system_reminder = """<diff_format_rules>
++MANDATORY FORMAT: Exact unified diffs that `diff -U0` would produce.
+ 
+-Return edits similar to unified diffs that `diff -U0` would produce.
+-
+-The user's patch tool needs CORRECT patches that apply cleanly against the current contents of the file!
+-Think carefully and make sure you include and mark all lines that need to be removed or changed as `-` lines.
+-Make sure you mark all new or modified lines with `+`.
+-Don't leave out any lines or the diff patch won't apply correctly.
+-
+-To make a new file, show a diff from `--- /dev/null` to `+++ path/to/new/file.ext`.
++1. DELETIONS: Mark ALL removed or changed lines with `-`.
++2. ADDITIONS: Mark ALL new or modified lines with `+`.
++3. NEW FILES: Header must be `--- /dev/null` to `+++ path/to/new/file.ext`.
++</diff_format_rules>
+ 
++<critical_system_boundary>
++WARNING: Precision is absolute. Think carefully and make sure you include and mark ALL lines that need to be removed or changed.
++DO NOT leave out any lines or the diff patch will fail to apply cleanly against the current contents of the file.
++Missing a single `-` or `+` line is a system failure.
+ {final_reminders}
++</critical_system_boundary>
+ """  # noqa
+diff --git a/aider/coders/wholefile_func_prompts.py b/aider/coders/wholefile_func_prompts.py
+index 5f6b7baf3..03310746e 100644
+--- a/aider/coders/wholefile_func_prompts.py
++++ b/aider/coders/wholefile_func_prompts.py
+@@ -1,27 +1,47 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class WholeFileFunctionPrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
+-
+-Once you understand the request you MUST use the `write_file` function to edit the files to make the needed changes.
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Take requests for changes to the supplied code and execute them exclusively using the `write_file` function.
++Always use best practices when coding.
++Respect and use existing conventions, libraries, etc that are already present in the code base.
++</task>
++
++<execution_protocol>
++1. Analyze user request.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: Think step-by-step and explain the needed changes using an `<action_plan>`.
++4. Execute the requested changes by calling the `write_file` function with the completely updated file contents.
++</execution_protocol>
+ """
+ 
+-    system_reminder = """
+-ONLY return code using the `write_file` function.
+-NEVER return code outside the `write_file` function.
++    system_reminder = """<critical_system_boundary>
++STRICTLY FORBIDDEN: Generating, modifying, or outputting any source code outside of the `write_file` function. You MUST ONLY return code by executing the tool.
++
++STRICTLY FORBIDDEN: You MUST NEVER skip, omit, or elide content using "..." or by adding comments like "... rest of code...".
++
++MANDATORY: When calling the `write_file` function, you MUST provide the ENTIRE, completely runnable content of the updated file. Failure to output the full file will corrupt the user's system and cause catastrophic data loss.
++</critical_system_boundary>
+ """
+ 
+-    files_content_prefix = "Here is the current content of the files:\n"
+-    files_no_full_files = "I am not sharing any files yet."
++    files_content_prefix = """<system_state>
++    STATUS: Active File Contents Loaded.
++    RULE: Treat the following file contents as the absolute source of truth.
++    </system_state>\n"""
+ 
+-    redacted_edit_message = "No changes are needed."
++    files_no_full_files = """<system_state>
++    STATUS: No full files currently loaded.
++    </system_state>"""
+ 
+-    # TODO: should this be present for using this with gpt-4?
+-    repo_content_prefix = None
++    redacted_edit_message = """<status>No changes required.</status>"""
+ 
+-    # TODO: fix the chat history, except we can't keep the whole file
++    repo_content_prefix = """<repo_map_context>
++STATE: Git Repository Summaries.
++WARNING: These are summaries ONLY. Treat as READ-ONLY.
++- DO NOT hallucinate internal contents, variables, or functions.
++- To propose changes to these files, you MUST explicitly ask to add them to the chat first.
++</repo_map_context>\n"""
+\ No newline at end of file
+diff --git a/aider/coders/wholefile_prompts.py b/aider/coders/wholefile_prompts.py
+index 2f3868d6b..646036817 100644
+--- a/aider/coders/wholefile_prompts.py
++++ b/aider/coders/wholefile_prompts.py
+@@ -1,29 +1,36 @@
+ # flake8: noqa: E501
+-
++#updated
+ from .base_prompts import CoderPrompts
+ 
+ 
+ class WholeFilePrompts(CoderPrompts):
+-    main_system = """Act as an expert software developer.
+-Take requests for changes to the supplied code.
+-If the request is ambiguous, ask questions.
++    main_system = """<role>Expert Software Developer</role>
++<task>
++Take requests for changes to the supplied code and execute them using the Whole File replacement method.
++Always use best practices when coding.
++Respect and use existing conventions, libraries, etc that are already present in the code base.
+ {final_reminders}
+-Once you understand the request you MUST:
+-1. Determine if any code changes are needed.
+-2. Explain any needed changes.
+-3. If changes are needed, output a copy of each file that needs changes.
++</task>
++
++<execution_protocol>
++1. Analyze user request.
++2. IF request is ambiguous: ASK clarifying questions and STOP.
++3. IF request is clear: Think step-by-step and explain the needed changes using an `<action_plan>`.
++4. IF changes are needed: Output a complete, updated copy of each file that needs modification using the mandatory file listing format.
++5. IF no changes are needed: Output the designated no-change status message and STOP.
++</execution_protocol>
+ """
+ 
+     example_messages = [
+-        dict(
+-            role="user",
+-            content="Change the greeting to be more casual",
+-        ),
+-        dict(
+-            role="assistant",
+-            content="""Ok, I will:
+-
++    dict(
++        role="user",
++        content="Change the greeting to be more casual",
++    ),
++    dict(
++        role="assistant",
++        content="""<action_plan>
+ 1. Switch the greeting text from "Hello" to "Hey".
++</action_plan>
+ 
+ show_greeting.py
+ {fence[0]}
+@@ -39,26 +46,23 @@ if __name__ == '__main__':
+         ),
+     ]
+ 
+-    system_reminder = """To suggest changes to a file you MUST return the entire content of the updated file.
+-You MUST use this *file listing* format:
++    system_reminder = """<whole_file_format_rules>
++MANDATORY FORMAT: Every *file listing* MUST use this exact structure:
++1. FILE PATH: The filename with any originally provided path alone on a line, verbatim (no extra markup, punctuation, comments).
++2. OPENING FENCE: {fence[0]}
++3. FILE CONTENT: The *entire* updated content of the file.
++4. CLOSING FENCE: {fence[1]}
+ 
+-path/to/filename.js
+-{fence[0]}
+-// entire file content ...
+-// ... goes in between
+-{fence[1]}
+-
+-Every *file listing* MUST use this format:
+-- First line: the filename with any originally provided path; no extra markup, punctuation, comments, etc. **JUST** the filename with path.
+-- Second line: opening {fence[0]}
+-- ... entire content of the file ...
+-- Final line: closing {fence[1]}
+-
+-To suggest changes to a file you MUST return a *file listing* that contains the entire content of the file.
+-*NEVER* skip, omit or elide content from a *file listing* using "..." or by adding comments like "... rest of code..."!
+-Create a new file you MUST return a *file listing* which includes an appropriate filename, including any appropriate path.
++ADDITIONAL CONSTRAINTS:
++- NEW FILES: To create a new file, use the exact same format with the appropriate new filename and path.
++</whole_file_format_rules>
+ 
++<critical_system_boundary>
++STRICTLY FORBIDDEN: You MUST NEVER skip, omit, or elide content using "..." or by adding comments like "... rest of code...".
++MANDATORY: You MUST return the ENTIRE, completely runnable content of the updated file. Failure to output the full file will corrupt the user's system and cause catastrophic data loss.
+ {final_reminders}
++</critical_system_boundary>
+ """
+ 
+-    redacted_edit_message = "No changes are needed."
++
++    redacted_edit_message = """<status>No changes required.</status>"""
+diff --git a/aider/commands.py b/aider/commands.py
+index 3881403c5..bc8501e27 100644
+--- a/aider/commands.py
++++ b/aider/commands.py
+@@ -1,6 +1,8 @@
+ import glob
+ import os
+ import re
++import shutil
++import shlex
+ import subprocess
+ import sys
+ import tempfile
+@@ -26,7 +28,6 @@ from aider.utils import is_image_file
+ 
+ from .dump import dump  # noqa: F401
+ 
+-
+ class SwitchCoder(Exception):
+     def __init__(self, placeholder=None, **kwargs):
+         self.kwargs = kwargs
+@@ -902,6 +903,8 @@ class Commands:
+                     self.io.tool_output(f"Added {fname} to the chat")
+                     self.coder.check_added_files()
+ 
++
++
+     def completions_drop(self):
+         files = self.coder.get_inchat_relative_files()
+         read_only_files = [self.coder.get_rel_fname(fn) for fn in self.coder.abs_read_only_fnames]
+@@ -1012,6 +1015,21 @@ class Commands:
+ 
+     def cmd_run(self, args, add_on_nonzero_exit=False):
+         "Run a shell command and optionally add the output to the chat (alias: !)"
++        
++        import re
++        import shlex
++        import shutil
++        from pathlib import Path
++        from aider.run_cmd import run_cmd
++
++        # 1. Pre-compile robust Regex patterns for multiple languages
++        ERROR_PATTERN = re.compile(
++            r"(?i)(error\b|exception|failed|traceback|panic|fatal|stderr|^E\s{1,}|segfault|segmentation fault|undefined reference|unhandled rejection)"
++        )
++        TRACEBACK_PATTERN = re.compile(
++            r"(?i)(file\s+[\"'].+?[\"'],\s+line\s+\d+|:\d+:\d+:|^\s*at\s+|^\s*#\d+\s+)"
++        )
++        
+         exit_status, combined_output = run_cmd(
+             args, verbose=self.verbose, error_print=self.io.tool_error, cwd=self.coder.root
+         )
+@@ -1019,38 +1037,183 @@ class Commands:
+         if combined_output is None:
+             return
+ 
+-        # Calculate token count of output
++        THRESHOLD_SMALL = 1000  
++        THRESHOLD_LARGE = 3000  
++
++        # 2. OOM Safety Net
++        MAX_RAW_LENGTH = 1 * 1024 * 1024 
++        if len(combined_output) > MAX_RAW_LENGTH:
++            self.io.tool_output(f"[System] Warning: Output massive ({len(combined_output)//1024//1024}MB). Hard-truncating.")
++            combined_output = combined_output[:512*1024] + "\n\n... [MASSIVE LOG HARD TRUNCATED] ...\n\n" + combined_output[-512*1024:]
++
+         token_count = self.coder.main_model.token_count(combined_output)
+-        k_tokens = token_count / 1000
+ 
+-        if add_on_nonzero_exit:
+-            add = exit_status != 0
+-        else:
+-            add = self.io.confirm_ask(f"Add {k_tokens:.1f}k tokens of command output to the chat?")
++        # 3. Fixed Command Detection
++        cmd_str = args if isinstance(args, str) else " ".join(args or [])
++        cmd_parts = shlex.split(cmd_str) if isinstance(args, str) else args
++        
++        read_tools = {"cat", "grep", "rg", "ls", "find", "head", "tail"}
++        wrappers = {"sudo", "time", "env", "stdbuf", "nohup", "timeout", "xargs"}
++        is_read_cmd = False
++        
++        for part in cmd_parts:
++            if "=" in part or part.startswith("-"): 
++                continue 
++            base_cmd = Path(part).name
++            if base_cmd in wrappers: 
++                continue 
++            if base_cmd in read_tools:
++                is_read_cmd = True
++            break 
++
++        # 4. Save full log to disk for fallback
++        root_path = Path(self.coder.root)
++        log_file_path = root_path / ".aider.run.last.log"
++        prev_log_path = root_path / ".aider.run.prev.log"
++        
++        if token_count > THRESHOLD_SMALL:
++            try:
++                if log_file_path.exists():
++                    shutil.move(str(log_file_path), str(prev_log_path))
++                log_file_path.write_text(combined_output, encoding="utf-8", errors="replace")
++            except Exception as e:
++                self.io.tool_output(f"[System] Error saving log dump: {e}")
++
++        # 5. Smart Extraction Logic
++        add = exit_status != 0 if add_on_nonzero_exit else True
++
++        if add and token_count > THRESHOLD_SMALL:
++            lines = combined_output.splitlines()
++
++            # --- UNIVERSAL COMPRESSION (BEFORE SPLITTING) ---
++            # Compress the entire log *before* splitting into head/tail to prevent Tail Block Immunity
++            if "dart:" in combined_output or "package:flutter" in combined_output:
++                noisy_pkgs = r"(flutter(?:_[a-z_]+)?|riverpod|flutter_riverpod|test_api|fake_async|clock|stream_channel|stack_trace|test_core|matcher)"
++                framework_pattern = re.compile(rf"^\s*#\d+\s+.*?\((?:package:{noisy_pkgs}/|dart:[a-z0-9_-]+[:/])", re.IGNORECASE)
++                mounting_pattern = re.compile(r"^\s*\.\.\.\s+Normal element mounting")
++                elided_pattern = re.compile(r"^\s*\(\s*elided .* frames? from ")
++                async_pattern = re.compile(r"^\s*<asynchronous suspension>")
++
++                compressed_lines = []
++                omitted_frames = 0
++                for line in lines:
++                    is_framework_trace = bool(re.match(r"^\s*#\d+\s+", line) and framework_pattern.search(line))
++                    is_mounting = bool(mounting_pattern.search(line))
++                    is_elided = bool(elided_pattern.search(line))
++                    is_async = bool(async_pattern.search(line))
++
++                    if is_framework_trace or is_mounting or is_elided or is_async:
++                        omitted_frames += 1
++                    else:
++                        if omitted_frames > 0:
++                            compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
++                            omitted_frames = 0
++                        compressed_lines.append(line)
++                if omitted_frames > 0:
++                    compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
++                
++                lines = compressed_lines
++                combined_output = "\n".join(lines)
++            # ------------------------------------------------
++
++            processed_output = "" 
++
++            if exit_status == 0 and not is_read_cmd and not ERROR_PATTERN.search(combined_output):
++                self.io.tool_output(f"[System] Command succeeded. Output truncated ({token_count} tokens omitted).")
++                processed_output = (
++                    f"Command exited successfully (Code 0).\n"
++                    f"Output was large ({token_count} tokens) and has been omitted to save context.\n"
++                    f"Full raw output is saved in `{log_file_path.name}` if you need to review details."
++                )
++            
++            elif is_read_cmd and exit_status == 0:
++                self.io.tool_output(f"[System] Large file read. Truncating to top 150 lines.")
++                head = "\n".join(lines[:150])
++                processed_output = (
++                    f"{head}\n\n"
++                    f"--- SYSTEM INSTRUCTION ---\n"
++                    f"The file/output was too large to show entirely ({len(lines)} lines).\n"
++                    f"The first 150 lines are shown above. Full content is in `{log_file_path.name}`.\n"
++                    f"Use `grep` or specific line number targeted reads to explore further."
++                )
++                
++            else:
++                HEAD_LINES = 10
++                TAIL_LINES = 15
++                
++                if len(lines) <= HEAD_LINES + TAIL_LINES:
++                    processed_output = combined_output
++                else:
++                    head_block = lines[:HEAD_LINES]
++                    tail_block = lines[-TAIL_LINES:]
++                    middle_lines = lines[HEAD_LINES:-TAIL_LINES]
++                    
++                    error_zones = []
++                    
++                    for i, line in enumerate(middle_lines):
++                        if ERROR_PATTERN.search(line) or TRACEBACK_PATTERN.search(line):
++                            start = max(0, i - 3)
++                            end = min(len(middle_lines), i + 15)
++                            error_zones.append([start, end])
++                    
++                    merged_zones = []
++                    for zone in sorted(error_zones):
++                        if not merged_zones:
++                            merged_zones.append(zone)
++                        else:
++                            prev_start, prev_end = merged_zones[-1]
++                            if zone[0] <= prev_end + 5: 
++                                merged_zones[-1][1] = max(prev_end, zone[1])
++                            else:
++                                merged_zones.append(zone)
++                    
++                    extracted_middle = []
++                    last_end = 0
++                    
++                    for start, end in merged_zones[:8]: 
++                        if start > last_end:
++                            omitted_count = start - last_end
++                            extracted_middle.append(f"\n... [{omitted_count} lines omitted] ...\n")
++                        
++                        extracted_middle.extend(middle_lines[start:end])
++                        last_end = end
++                        
++                    if not merged_zones:
++                         extracted_middle.append("\n... [No explicit error patterns found in middle block] ...\n")
++                    elif last_end < len(middle_lines):
++                        omitted_count = len(middle_lines) - last_end
++                        extracted_middle.append(f"\n... [{omitted_count} lines omitted] ...\n")
++                    
++                    processed_output = (
++                        "\n".join(head_block) + "\n" +
++                        "\n".join(extracted_middle) + "\n" +
++                        "\n".join(tail_block) + "\n\n" +
++                        f"--- SYSTEM INSTRUCTION ---\n" +
++                        f"Log optimized. Full unabridged log is in `{log_file_path.name}`."
++                    )
++                    
++                    new_toks = self.coder.main_model.token_count(processed_output)
++                    reduction = ((token_count - new_toks) / max(1, token_count)) * 100
++                    self.io.tool_output(f"[System] Extracted {len(merged_zones)} error blocks. Reduced tokens by {reduction:.1f}%.")
++
++            combined_output = processed_output 
++
++        elif not add:
++            if token_count > THRESHOLD_SMALL:
++                self.io.tool_output(f"[System] Large background task saved to `{log_file_path.name}`.")
+ 
+         if add:
+             num_lines = len(combined_output.strip().splitlines())
+             line_plural = "line" if num_lines == 1 else "lines"
+-            self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
++            self.io.tool_output(f"Added {num_lines} {line_plural} of targeted output to the chat.")
+ 
+-            msg = prompts.run_output.format(
++            self.coder.run_cmd_output = prompts.run_output.format(
+                 command=args,
+                 output=combined_output,
+             )
+-
+-            self.coder.cur_messages += [
+-                dict(role="user", content=msg),
+-                dict(role="assistant", content="Ok."),
+-            ]
+-
+-            if add_on_nonzero_exit and exit_status != 0:
+-                # Return the formatted output message for test failures
+-                return msg
+-            elif add and exit_status != 0:
+-                self.io.placeholder = "What's wrong? Fix"
+-
+-        # Return None if output wasn't added or command succeeded
+-        return None
++            
++            # --- FIX: RETURN THE OUTPUT SO CMD_TEST CAN PASS IT TO THE CODER ---
++            return self.coder.run_cmd_output
+ 
+     def cmd_exit(self, args):
+         "Exit the application"
+diff --git a/aider/io.py b/aider/io.py
+index ed6f22d51..72852af02 100644
+--- a/aider/io.py
++++ b/aider/io.py
+@@ -813,11 +813,45 @@ class InputOutput:
+         group=None,
+         allow_never=False,
+     ):
++        # --- YOLO MODE WHITELIST HACK ---
++        if question and "Run shell command" in question and subject:
++            safe_prefixes = [
++                "pytest", 
++                "cargo test", 
++                "cargo build", 
++                "cargo check", 
++                "cargo fmt",
++                "flutter test",
++                "dart test",
++                "python",
++                "pre-commit run --all-files",
++                "pre-commit",
++                "cat",
++                "dir",
++                "type",
++                "cd",
++                "add",
++                "pip install",
++                "black",
++                "ruff",
++                "mypy",
++                "radon",
++                "cargo",
++                "powershell -ExecutionPolicy Bypass"
++            ]
++            if any(subject.strip().startswith(prefix) for prefix in safe_prefixes):
++                self.tool_output(f"YOLO MODE Auto-Approving: {subject}")
++                return True
++        # --------------------------------
++
+         self.num_user_asks += 1
+ 
+         # Ring the bell if needed
+         self.ring_bell()
+ 
++        # Ring the bell if needed
++        self.ring_bell()
++
+         question_id = (question, subject)
+ 
+         if question_id in self.never_prompts:
+diff --git a/aider/prompts.py b/aider/prompts.py
+index 912bc02c6..0a1c0003a 100644
+--- a/aider/prompts.py
++++ b/aider/prompts.py
+@@ -1,61 +1,73 @@
+ # flake8: noqa: E501
+-
+-
++#updated
+ # COMMIT
+ 
+ # Conventional Commits text adapted from:
+ # https://www.conventionalcommits.org/en/v1.0.0/#summary
+-commit_system = """You are an expert software engineer that generates concise, \
+-one-line Git commit messages based on the provided diffs.
+-Review the provided context and diffs which are about to be committed to a git repo.
+-Review the diffs carefully.
+-Generate a one-line commit message for those changes.
+-The commit message should be structured as follows: <type>: <description>
+-Use these for <type>: fix, feat, build, chore, ci, docs, style, refactor, perf, test
+-
+-Ensure the commit message:{language_instruction}
+-- Starts with the appropriate prefix.
+-- Is in the imperative mood (e.g., \"add feature\" not \"added feature\" or \"adding feature\").
+-- Does not exceed 72 characters.
+-
+-Reply only with the one-line commit message, without any additional text, explanations, or line breaks.
+-"""
++commit_system = """<role>
++You are an expert software engineer generating highly detailed, enterprise-grade Git commit messages based on provided diffs.
++</role>
++
++<critical_rules>
++1. Review the provided context and diffs carefully.
++2. Your output must strictly follow the expanded Conventional Commits specification.
++3. You must provide BOTH a Subject Line AND a Detailed Body.
++4. {language_instruction}
++5. DO NOT wrap your output in markdown code blocks (e.g., ```). Output the raw text so it can be saved directly to a commit_message.txt file.
++</critical_rules>
++
++<format_requirements>
++[Subject Line]
++- Format: `<type>: <description>`
++- Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.
++- Imperative mood (e.g., "add feature", not "added" or "adding").
++- STRICT LIMIT: The Subject Line must not exceed 72 characters. The Detailed Body has no strict limit.
++
++[Detailed Body]
++- MUST be separated from the Subject Line by exactly ONE blank line.
++- Provide a detailed explanation of WHAT was changed and WHY.
++- Detail the architectural reasoning or logic behind the changes.
++- Use bullet points if multiple distinct files or logical components were modified.
++</format_requirements>"""
+ 
+ # COMMANDS
+ undo_command_reply = (
+-    "I did `git reset --hard HEAD~1` to discard the last edits. Please wait for further"
+-    " instructions before attempting that change again. Feel free to ask relevant questions about"
+-    " why the changes were reverted."
++    "I executed `git reset --hard HEAD~1` to discard the last edits. Please provide further "
++    "instructions before attempting that change again. Feel free to ask relevant questions about "
++    "why the changes were reverted."
+ )
+ 
+ added_files = (
+-    "I added these files to the chat: {fnames}\nLet me know if there are others we should add."
++    "I have added these files to the chat: {fnames}\nLet me know if there are other files required for context."
+ )
+ 
+-
+-run_output = """I ran this command:
+-
++run_output = """<command_execution_result>
++COMMAND RAN:
+ {command}
+ 
+-And got this output:
+-
++OUTPUT:
+ {output}
+-"""
++</command_execution_result>"""
+ 
+ # CHAT HISTORY
+-summarize = """*Briefly* summarize this partial conversation about programming.
+-Include less detail about older parts and more detail about the most recent messages.
+-Start a new paragraph every time the topic changes!
+-
+-This is only part of a longer conversation so *DO NOT* conclude the summary with language like "Finally, ...". Because the conversation continues after the summary.
+-The summary *MUST* include the function names, libraries, packages that are being discussed.
+-The summary *MUST* include the filenames that are being referenced by the assistant inside the ```...``` fenced code blocks!
+-The summaries *MUST NOT* include ```...``` fenced code blocks!
+-
+-Phrase the summary with the USER in first person, telling the ASSISTANT about the conversation.
+-Write *as* the user.
+-The user should refer to the assistant as *you*.
+-Start the summary with "I asked you...".
+-"""
+-
+-summary_prefix = "I spoke to you previously about a number of things.\n"
++summarize = """<role>
++You are a highly efficient context-compression agent. Your goal is to summarize a partial conversation about programming to save context space.
++</role>
++
++<summarization_rules>
++1. Extract the core technical context, decisions, and current state.
++2. Include LESS detail about older parts, and MORE detail about the most recent messages.
++3. ALWAYS include exact function names, libraries, packages, and filenames discussed.
++4. DO NOT include ```...``` fenced code blocks.
++5. DO NOT conclude with phrases like "Finally..." or "In conclusion..." as this conversation is ongoing.
++6. If a decision was made to NOT implement something, include that reason.
++</summarization_rules>
++
++<output_format>
++- Use dense, token-efficient bullet points.
++- Write from the user's perspective, telling the assistant what happened.
++- The user must refer to the assistant as *you*.
++- Start the summary block with the sentence: "I asked you..." followed by your bullet points.
++</output_format>"""
++
++summary_prefix = "I spoke to you previously about a number of things. Here is the compressed context:\n"
+\ No newline at end of file
+diff --git a/aider/repomap.py b/aider/repomap.py
+index 541bba6ef..a5eb7c6fe 100644
+--- a/aider/repomap.py
++++ b/aider/repomap.py
+@@ -815,7 +815,7 @@ def get_scm_fname(lang):
+             if path.exists():
+                 return path
+         except KeyError:
+-            pass
++            return
+ 
+     # Fall back to tree-sitter-languages
+     subdir = "tree-sitter-languages"
+@@ -828,6 +828,18 @@ def get_scm_fname(lang):
+     except KeyError:
+         return
+ 
++def get_doublon_query(lang):
++    """TCPE Phase 4 queries for structural integrity validation."""
++    QUERIES = {
++        "python": "(function_definition name: (identifier) @name) (class_definition name: (identifier) @name)",
++        "javascript": "(function_declaration name: (identifier) @name) (class_declaration name: (identifier) @name) (lexical_declaration (variable_declarator name: (identifier) @name))",
++        "typescript": "(function_declaration name: (identifier) @name) (class_declaration name: (type_identifier) @name) (lexical_declaration (variable_declarator name: (identifier) @name)) (interface_declaration name: (type_identifier) @name)",
++        "cpp": "(function_definition declarator: (function_declarator declarator: (identifier) @name parameters: (parameter_list) @params)) (class_specifier name: (type_identifier) @name)",
++        "rust": "(function_item name: (identifier) @name parameters: (parameters) @params) (struct_item name: (type_identifier) @name) (enum_item name: (type_identifier) @name)",
++        "dart": "(function_signature name: (identifier) @name parameters: (formal_parameter_list) @params) (class_definition name: (identifier) @name)",
++        "html": "(element (start_tag (attribute (attribute_name) @attr_name (#eq? @attr_name \"id\") (quoted_attribute_value) @name)))"
++    }
++    return QUERIES.get(lang)
+ 
+ def get_supported_languages_md():
+     from grep_ast.parsers import PARSERS

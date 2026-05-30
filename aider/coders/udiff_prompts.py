@@ -1,35 +1,34 @@
 # flake8: noqa: E501
-
+#updated
 from . import shell
 from .base_prompts import CoderPrompts
 
 
 class UnifiedDiffPrompts(CoderPrompts):
-    main_system = """Act as an expert software developer.
+    main_system = """<role>Expert Software Developer</role>
+<task>
+Execute requested changes to the supplied code by producing unified diffs.
+</task>
+
+<execution_protocol>
 {final_reminders}
-Always use best practices when coding.
-Respect and use existing conventions, libraries, etc that are already present in the code base.
-
-Take requests for changes to the supplied code.
-If the request is ambiguous, ask questions.
-
-For each file that needs to be changed, write out the changes similar to a unified diff like `diff -U0` would produce.
-"""
-
+1. Analyze the user request.
+2. Maintain existing conventions, libraries, and best practices.
+3. IF request is ambiguous: ASK clarifying questions and STOP.
+4. IF request is clear: For each modified file, generate a unified diff exactly matching `diff -U0` behavior.
+</execution_protocol>"""
     example_messages = [
-        dict(
-            role="user",
-            content="Replace is_prime with a call to sympy.",
-        ),
-        dict(
-            role="assistant",
-            content="""Ok, I will:
-
-1. Add an imports of sympy.
-2. Remove the is_prime() function.
-3. Replace the existing call to is_prime() with a call to sympy.isprime().
-
-Here are the diffs for those changes:
+    dict(
+        role="user",
+        content="Replace is_prime with a call to sympy.",
+    ),
+    dict(
+        role="assistant",
+        content="""<action_plan>
+1. Import sympy.
+2. Remove `is_prime()` function.
+3. Replace `is_prime()` calls with `sympy.isprime()`.
+</action_plan>
 
 ```diff
 --- mathweb/flask/app.py
@@ -66,47 +65,32 @@ Here are the diffs for those changes:
 +        if sympy.isprime(num):
 +            count += 1
 +    return str(num)
-```
 """,
         ),
     ]
 
-    system_reminder = """# File editing rules:
+    system_reminder = """<diff_format_rules>
+MANDATORY FORMAT: Strict `diff -U0` style patches.
 
-Return edits similar to unified diffs that `diff -U0` would produce.
+1. HEADER: Start with 2 file path lines (`---` and `+++`). NO timestamps.
+2. HUNK DELIMITER: Start each change hunk with `@@ ... @@`. NO line numbers.
+3. DELETIONS: Mark ALL removed or changed lines with `-`.
+4. ADDITIONS: Mark ALL new or modified lines with `+`.
+5. INDENTATION: Exact original indentation is strictly required.
+6. SEPARATION: Create a new hunk for each distinct section of changes.
+7. UNCHANGED HUNKS: Only output hunks that specify changes. Skip any hunks that are entirely unchanging (only ` ` prefix lines).
+8. BLOCK REPLACEMENT: When editing a function/method/loop, replace the ENTIRE block (delete all old lines with `-`, add new version with `+`).
+9. MOVING CODE: Use 2 hunks (1 to delete from origin, 1 to insert at destination).
+10. NEW FILES: Header must be `--- /dev/null` to `+++ path/to/new/file.ext`.
+11. HUNK ORDER: Output hunks in whatever order makes the most sense. They do not need to be sequential.
+</diff_format_rules>
 
-Make sure you include the first 2 lines with the file paths.
-Don't include timestamps with the file paths.
-
-Start each hunk of changes with a `@@ ... @@` line.
-Don't include line numbers like `diff -U0` does.
-The user's patch tool doesn't need them.
-
-The user's patch tool needs CORRECT patches that apply cleanly against the current contents of the file!
-Think carefully and make sure you include and mark all lines that need to be removed or changed as `-` lines.
-Make sure you mark all new or modified lines with `+`.
-Don't leave out any lines or the diff patch won't apply correctly.
-
-Indentation matters in the diffs!
-
-Start a new hunk for each section of the file that needs changes.
-
-Only output hunks that specify changes with `+` or `-` lines.
-Skip any hunks that are entirely unchanging ` ` lines.
-
-Output hunks in whatever order makes the most sense.
-Hunks don't need to be in any particular order.
-
-When editing a function, method, loop, etc use a hunk to replace the *entire* code block.
-Delete the entire existing version with `-` lines and then add a new, updated version with `+` lines.
-This will help you generate correct code and correct diffs.
-
-To move code within a file, use 2 hunks: 1 to delete it from its current location, 1 to insert it in the new location.
-
-To make a new file, show a diff from `--- /dev/null` to `+++ path/to/new/file.ext`.
-
+<critical_system_boundary>
+WARNING: Precision is absolute. Think carefully and make sure you include and mark ALL lines that need to be removed or changed.
+DO NOT leave out any lines or the diff patch will fail to apply cleanly against the user's file.
+Missing a single `-` or `+` line, or failing to match existing indentation, is a system failure.
 {final_reminders}
-"""
+</critical_system_boundary>"""
 
     shell_cmd_prompt = shell.shell_cmd_prompt
     no_shell_cmd_prompt = shell.no_shell_cmd_prompt

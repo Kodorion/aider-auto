@@ -1,61 +1,73 @@
 # flake8: noqa: E501
-
-
+#updated
 # COMMIT
 
 # Conventional Commits text adapted from:
 # https://www.conventionalcommits.org/en/v1.0.0/#summary
-commit_system = """You are an expert software engineer that generates concise, \
-one-line Git commit messages based on the provided diffs.
-Review the provided context and diffs which are about to be committed to a git repo.
-Review the diffs carefully.
-Generate a one-line commit message for those changes.
-The commit message should be structured as follows: <type>: <description>
-Use these for <type>: fix, feat, build, chore, ci, docs, style, refactor, perf, test
+commit_system = """<role>
+You are an expert software engineer generating highly detailed, enterprise-grade Git commit messages based on provided diffs.
+</role>
 
-Ensure the commit message:{language_instruction}
-- Starts with the appropriate prefix.
-- Is in the imperative mood (e.g., \"add feature\" not \"added feature\" or \"adding feature\").
-- Does not exceed 72 characters.
+<critical_rules>
+1. Review the provided context and diffs carefully.
+2. Your output must strictly follow the expanded Conventional Commits specification.
+3. You must provide BOTH a Subject Line AND a Detailed Body.
+4. {language_instruction}
+5. DO NOT wrap your output in markdown code blocks (e.g., ```). Output the raw text so it can be saved directly to a commit_message.txt file.
+</critical_rules>
 
-Reply only with the one-line commit message, without any additional text, explanations, or line breaks.
-"""
+<format_requirements>
+[Subject Line]
+- Format: `<type>: <description>`
+- Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.
+- Imperative mood (e.g., "add feature", not "added" or "adding").
+- STRICT LIMIT: The Subject Line must not exceed 72 characters. The Detailed Body has no strict limit.
+
+[Detailed Body]
+- MUST be separated from the Subject Line by exactly ONE blank line.
+- Provide a detailed explanation of WHAT was changed and WHY.
+- Detail the architectural reasoning or logic behind the changes.
+- Use bullet points if multiple distinct files or logical components were modified.
+</format_requirements>"""
 
 # COMMANDS
 undo_command_reply = (
-    "I did `git reset --hard HEAD~1` to discard the last edits. Please wait for further"
-    " instructions before attempting that change again. Feel free to ask relevant questions about"
-    " why the changes were reverted."
+    "I executed `git reset --hard HEAD~1` to discard the last edits. Please provide further "
+    "instructions before attempting that change again. Feel free to ask relevant questions about "
+    "why the changes were reverted."
 )
 
 added_files = (
-    "I added these files to the chat: {fnames}\nLet me know if there are others we should add."
+    "I have added these files to the chat: {fnames}\nLet me know if there are other files required for context."
 )
 
-
-run_output = """I ran this command:
-
+run_output = """<command_execution_result>
+COMMAND RAN:
 {command}
 
-And got this output:
-
+OUTPUT:
 {output}
-"""
+</command_execution_result>"""
 
 # CHAT HISTORY
-summarize = """*Briefly* summarize this partial conversation about programming.
-Include less detail about older parts and more detail about the most recent messages.
-Start a new paragraph every time the topic changes!
+summarize = """<role>
+You are a highly efficient context-compression agent. Your goal is to summarize a partial conversation about programming to save context space.
+</role>
 
-This is only part of a longer conversation so *DO NOT* conclude the summary with language like "Finally, ...". Because the conversation continues after the summary.
-The summary *MUST* include the function names, libraries, packages that are being discussed.
-The summary *MUST* include the filenames that are being referenced by the assistant inside the ```...``` fenced code blocks!
-The summaries *MUST NOT* include ```...``` fenced code blocks!
+<summarization_rules>
+1. Extract the core technical context, decisions, and current state.
+2. Include LESS detail about older parts, and MORE detail about the most recent messages.
+3. ALWAYS include exact function names, libraries, packages, and filenames discussed.
+4. DO NOT include ```...``` fenced code blocks.
+5. DO NOT conclude with phrases like "Finally..." or "In conclusion..." as this conversation is ongoing.
+6. If a decision was made to NOT implement something, include that reason.
+</summarization_rules>
 
-Phrase the summary with the USER in first person, telling the ASSISTANT about the conversation.
-Write *as* the user.
-The user should refer to the assistant as *you*.
-Start the summary with "I asked you...".
-"""
+<output_format>
+- Use dense, token-efficient bullet points.
+- Write from the user's perspective, telling the assistant what happened.
+- The user must refer to the assistant as *you*.
+- Start the summary block with the sentence: "I asked you..." followed by your bullet points.
+</output_format>"""
 
-summary_prefix = "I spoke to you previously about a number of things.\n"
+summary_prefix = "I spoke to you previously about a number of things. Here is the compressed context:\n"

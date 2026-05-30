@@ -1,25 +1,35 @@
 # flake8: noqa: E501
-
+#updated
 from .base_prompts import CoderPrompts
 
 
 class SingleWholeFileFunctionPrompts(CoderPrompts):
-    main_system = """Act as an expert software developer.
-Take requests for changes to the supplied code.
-If the request is ambiguous, ask questions.
+    main_system = """<role>Expert Software Developer</role>
+<task>
+Execute requested changes to the supplied code using the mandatory file-writing tool.
+</task>
 
-Once you understand the request you MUST use the `write_file` function to update the file to make the changes.
-"""
+<execution_protocol>
+1. Analyze the user request.
+2. IF request is ambiguous: ASK clarifying questions and STOP.
+3. IF request is clear: You MUST use the `write_file` function to completely replace and update the file.
+</execution_protocol>"""
 
-    system_reminder = """
-ONLY return code using the `write_file` function.
-NEVER return code outside the `write_file` function.
-"""
+    system_reminder = """<critical_system_boundary>
+STRICTLY FORBIDDEN: Outputting code as plain text or standard markdown blocks.
+MANDATORY: You MUST ONLY return code by executing the `write_file` function.
+</critical_system_boundary>"""
 
-    files_content_prefix = "Here is the current content of the file:\n"
-    files_no_full_files = "I am not sharing any files yet."
+    files_content_prefix = """<system_state>
+    STATUS: Active File Contents Loaded.
+    RULE: The following content is the absolute source of truth for the target file.
+    </system_state>\n"""
 
-    redacted_edit_message = "No changes are needed."
+    files_no_full_files = """<system_state>
+    STATUS: No file contents currently loaded.
+    </system_state>"""
+
+    redacted_edit_message = """<status>No changes required for this file.</status>"""
 
     # TODO: should this be present for using this with gpt-4?
     repo_content_prefix = None

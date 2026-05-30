@@ -47,31 +47,61 @@ class EditBlockCoder(Coder):
             path, original, updated = edit
             full_path = self.abs_root_path(path)
             new_content = None
+            tcpe_error = None
+
+            # --- NEW: IDEMPOTENT EDIT GUARD ---
+            if original.strip() and original.strip() == updated.strip():
+                tcpe_error = "[SYSTEM LOG: Edit aborted. Your SEARCH block is exactly identical to your REPLACE block. You made absolutely zero changes to the code. You must write new/modified code in the REPLACE block to fix the failing tests.]"
+                failed.append((path, original, updated, tcpe_error))
+                if not dry_run:
+                    self.tcpe.track_failed_block(path, updated)
+                continue
+            # ----------------------------------
 
             if Path(full_path).exists():
                 content = self.io.read_text(full_path)
                 new_content = do_replace(full_path, content, original, updated, self.fence)
 
+                if new_content and not dry_run:
+                    is_safe, tcpe_error = self.tcpe.check_anti_doublon(new_content, path)
+                    if not is_safe:
+                        new_content = None
+
             # If the edit failed, and
             # this is not a "create a new file" with an empty original...
             # https://github.com/Aider-AI/aider/issues/2258
-            if not new_content and original.strip():
+            if not new_content and original.strip() and not tcpe_error:
                 # try patching any of the other files in the chat
-                for full_path in self.abs_fnames:
-                    content = self.io.read_text(full_path)
-                    new_content = do_replace(full_path, content, original, updated, self.fence)
-                    if new_content:
-                        path = self.get_rel_fname(full_path)
+                for f in self.abs_fnames:
+                    content = self.io.read_text(f)
+                    nc = do_replace(f, content, original, updated, self.fence)
+                    if nc:
+                        if not dry_run:
+                            is_safe, t_err = self.tcpe.check_anti_doublon(nc, f)
+                            if not is_safe:
+                                tcpe_error = t_err
+                                break
+                        new_content = nc
+                        path = self.get_rel_fname(f)
+                        full_path = f
                         break
 
             updated_edits.append((path, original, updated))
 
             if new_content:
                 if not dry_run:
+                    modified_symbols = self.tcpe.extract_modified_symbols(path, content if content else "", new_content)
                     self.io.write_text(full_path, new_content)
+                    
+                    self.tcpe.process_successful_edit(path, updated)
+                    self.partial_response_content = self.tcpe.scrub_message(
+                        self.partial_response_content, path, modified_symbols, original, updated
+                    )
                 passed.append(edit)
             else:
-                failed.append(edit)
+                failed.append((path, original, updated, tcpe_error))
+                if not dry_run and not tcpe_error:
+                    self.tcpe.track_failed_block(path, updated)
 
         if dry_run:
             return updated_edits
@@ -83,7 +113,11 @@ class EditBlockCoder(Coder):
 
         res = f"# {len(failed)} SEARCH/REPLACE {blocks} failed to match!\n"
         for edit in failed:
-            path, original, updated = edit
+            path, original, updated, tcpe_err = edit
+
+            if tcpe_err:
+                res += f"\n{tcpe_err}\n<<<<<<< SEARCH\n{original}=======\n{updated}>>>>>>> REPLACE\n\n"
+                continue
 
             full_path = self.abs_root_path(path)
             content = self.io.read_text(full_path)

@@ -1,6 +1,8 @@
 import glob
 import os
 import re
+import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,6 @@ from aider.scrape import Scraper, install_playwright
 from aider.utils import is_image_file
 
 from .dump import dump  # noqa: F401
-
 
 class SwitchCoder(Exception):
     def __init__(self, placeholder=None, **kwargs):
@@ -902,6 +903,8 @@ class Commands:
                     self.io.tool_output(f"Added {fname} to the chat")
                     self.coder.check_added_files()
 
+
+
     def completions_drop(self):
         files = self.coder.get_inchat_relative_files()
         read_only_files = [self.coder.get_rel_fname(fn) for fn in self.coder.abs_read_only_fnames]
@@ -1012,6 +1015,21 @@ class Commands:
 
     def cmd_run(self, args, add_on_nonzero_exit=False):
         "Run a shell command and optionally add the output to the chat (alias: !)"
+        
+        import re
+        import shlex
+        import shutil
+        from pathlib import Path
+        from aider.run_cmd import run_cmd
+
+        # 1. Pre-compile robust Regex patterns for multiple languages
+        ERROR_PATTERN = re.compile(
+            r"(?i)(error\b|exception|failed|traceback|panic|fatal|stderr|^E\s{1,}|segfault|segmentation fault|undefined reference|unhandled rejection)"
+        )
+        TRACEBACK_PATTERN = re.compile(
+            r"(?i)(file\s+[\"'].+?[\"'],\s+line\s+\d+|:\d+:\d+:|^\s*at\s+|^\s*#\d+\s+)"
+        )
+        
         exit_status, combined_output = run_cmd(
             args, verbose=self.verbose, error_print=self.io.tool_error, cwd=self.coder.root
         )
@@ -1019,38 +1037,183 @@ class Commands:
         if combined_output is None:
             return
 
-        # Calculate token count of output
-        token_count = self.coder.main_model.token_count(combined_output)
-        k_tokens = token_count / 1000
+        THRESHOLD_SMALL = 1000  
+        THRESHOLD_LARGE = 3000  
 
-        if add_on_nonzero_exit:
-            add = exit_status != 0
-        else:
-            add = self.io.confirm_ask(f"Add {k_tokens:.1f}k tokens of command output to the chat?")
+        # 2. OOM Safety Net
+        MAX_RAW_LENGTH = 1 * 1024 * 1024 
+        if len(combined_output) > MAX_RAW_LENGTH:
+            self.io.tool_output(f"[System] Warning: Output massive ({len(combined_output)//1024//1024}MB). Hard-truncating.")
+            combined_output = combined_output[:512*1024] + "\n\n... [MASSIVE LOG HARD TRUNCATED] ...\n\n" + combined_output[-512*1024:]
+
+        token_count = self.coder.main_model.token_count(combined_output)
+
+        # 3. Fixed Command Detection
+        cmd_str = args if isinstance(args, str) else " ".join(args or [])
+        cmd_parts = shlex.split(cmd_str) if isinstance(args, str) else args
+        
+        read_tools = {"cat", "grep", "rg", "ls", "find", "head", "tail"}
+        wrappers = {"sudo", "time", "env", "stdbuf", "nohup", "timeout", "xargs"}
+        is_read_cmd = False
+        
+        for part in cmd_parts:
+            if "=" in part or part.startswith("-"): 
+                continue 
+            base_cmd = Path(part).name
+            if base_cmd in wrappers: 
+                continue 
+            if base_cmd in read_tools:
+                is_read_cmd = True
+            break 
+
+        # 4. Save full log to disk for fallback
+        root_path = Path(self.coder.root)
+        log_file_path = root_path / ".aider.run.last.log"
+        prev_log_path = root_path / ".aider.run.prev.log"
+        
+        if token_count > THRESHOLD_SMALL:
+            try:
+                if log_file_path.exists():
+                    shutil.move(str(log_file_path), str(prev_log_path))
+                log_file_path.write_text(combined_output, encoding="utf-8", errors="replace")
+            except Exception as e:
+                self.io.tool_output(f"[System] Error saving log dump: {e}")
+
+        # 5. Smart Extraction Logic
+        add = exit_status != 0 if add_on_nonzero_exit else True
+
+        if add and token_count > THRESHOLD_SMALL:
+            lines = combined_output.splitlines()
+
+            # --- UNIVERSAL COMPRESSION (BEFORE SPLITTING) ---
+            # Compress the entire log *before* splitting into head/tail to prevent Tail Block Immunity
+            if "dart:" in combined_output or "package:flutter" in combined_output:
+                noisy_pkgs = r"(flutter(?:_[a-z_]+)?|riverpod|flutter_riverpod|test_api|fake_async|clock|stream_channel|stack_trace|test_core|matcher)"
+                framework_pattern = re.compile(rf"^\s*#\d+\s+.*?\((?:package:{noisy_pkgs}/|dart:[a-z0-9_-]+[:/])", re.IGNORECASE)
+                mounting_pattern = re.compile(r"^\s*\.\.\.\s+Normal element mounting")
+                elided_pattern = re.compile(r"^\s*\(\s*elided .* frames? from ")
+                async_pattern = re.compile(r"^\s*<asynchronous suspension>")
+
+                compressed_lines = []
+                omitted_frames = 0
+                for line in lines:
+                    is_framework_trace = bool(re.match(r"^\s*#\d+\s+", line) and framework_pattern.search(line))
+                    is_mounting = bool(mounting_pattern.search(line))
+                    is_elided = bool(elided_pattern.search(line))
+                    is_async = bool(async_pattern.search(line))
+
+                    if is_framework_trace or is_mounting or is_elided or is_async:
+                        omitted_frames += 1
+                    else:
+                        if omitted_frames > 0:
+                            compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
+                            omitted_frames = 0
+                        compressed_lines.append(line)
+                if omitted_frames > 0:
+                    compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
+                
+                lines = compressed_lines
+                combined_output = "\n".join(lines)
+            # ------------------------------------------------
+
+            processed_output = "" 
+
+            if exit_status == 0 and not is_read_cmd and not ERROR_PATTERN.search(combined_output):
+                self.io.tool_output(f"[System] Command succeeded. Output truncated ({token_count} tokens omitted).")
+                processed_output = (
+                    f"Command exited successfully (Code 0).\n"
+                    f"Output was large ({token_count} tokens) and has been omitted to save context.\n"
+                    f"Full raw output is saved in `{log_file_path.name}` if you need to review details."
+                )
+            
+            elif is_read_cmd and exit_status == 0:
+                self.io.tool_output(f"[System] Large file read. Truncating to top 150 lines.")
+                head = "\n".join(lines[:150])
+                processed_output = (
+                    f"{head}\n\n"
+                    f"--- SYSTEM INSTRUCTION ---\n"
+                    f"The file/output was too large to show entirely ({len(lines)} lines).\n"
+                    f"The first 150 lines are shown above. Full content is in `{log_file_path.name}`.\n"
+                    f"Use `grep` or specific line number targeted reads to explore further."
+                )
+                
+            else:
+                HEAD_LINES = 10
+                TAIL_LINES = 15
+                
+                if len(lines) <= HEAD_LINES + TAIL_LINES:
+                    processed_output = combined_output
+                else:
+                    head_block = lines[:HEAD_LINES]
+                    tail_block = lines[-TAIL_LINES:]
+                    middle_lines = lines[HEAD_LINES:-TAIL_LINES]
+                    
+                    error_zones = []
+                    
+                    for i, line in enumerate(middle_lines):
+                        if ERROR_PATTERN.search(line) or TRACEBACK_PATTERN.search(line):
+                            start = max(0, i - 3)
+                            end = min(len(middle_lines), i + 15)
+                            error_zones.append([start, end])
+                    
+                    merged_zones = []
+                    for zone in sorted(error_zones):
+                        if not merged_zones:
+                            merged_zones.append(zone)
+                        else:
+                            prev_start, prev_end = merged_zones[-1]
+                            if zone[0] <= prev_end + 5: 
+                                merged_zones[-1][1] = max(prev_end, zone[1])
+                            else:
+                                merged_zones.append(zone)
+                    
+                    extracted_middle = []
+                    last_end = 0
+                    
+                    for start, end in merged_zones[:8]: 
+                        if start > last_end:
+                            omitted_count = start - last_end
+                            extracted_middle.append(f"\n... [{omitted_count} lines omitted] ...\n")
+                        
+                        extracted_middle.extend(middle_lines[start:end])
+                        last_end = end
+                        
+                    if not merged_zones:
+                         extracted_middle.append("\n... [No explicit error patterns found in middle block] ...\n")
+                    elif last_end < len(middle_lines):
+                        omitted_count = len(middle_lines) - last_end
+                        extracted_middle.append(f"\n... [{omitted_count} lines omitted] ...\n")
+                    
+                    processed_output = (
+                        "\n".join(head_block) + "\n" +
+                        "\n".join(extracted_middle) + "\n" +
+                        "\n".join(tail_block) + "\n\n" +
+                        f"--- SYSTEM INSTRUCTION ---\n" +
+                        f"Log optimized. Full unabridged log is in `{log_file_path.name}`."
+                    )
+                    
+                    new_toks = self.coder.main_model.token_count(processed_output)
+                    reduction = ((token_count - new_toks) / max(1, token_count)) * 100
+                    self.io.tool_output(f"[System] Extracted {len(merged_zones)} error blocks. Reduced tokens by {reduction:.1f}%.")
+
+            combined_output = processed_output 
+
+        elif not add:
+            if token_count > THRESHOLD_SMALL:
+                self.io.tool_output(f"[System] Large background task saved to `{log_file_path.name}`.")
 
         if add:
             num_lines = len(combined_output.strip().splitlines())
             line_plural = "line" if num_lines == 1 else "lines"
-            self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
+            self.io.tool_output(f"Added {num_lines} {line_plural} of targeted output to the chat.")
 
-            msg = prompts.run_output.format(
+            self.coder.run_cmd_output = prompts.run_output.format(
                 command=args,
                 output=combined_output,
             )
-
-            self.coder.cur_messages += [
-                dict(role="user", content=msg),
-                dict(role="assistant", content="Ok."),
-            ]
-
-            if add_on_nonzero_exit and exit_status != 0:
-                # Return the formatted output message for test failures
-                return msg
-            elif add and exit_status != 0:
-                self.io.placeholder = "What's wrong? Fix"
-
-        # Return None if output wasn't added or command succeeded
-        return None
+            
+            # --- FIX: RETURN THE OUTPUT SO CMD_TEST CAN PASS IT TO THE CODER ---
+            return self.coder.run_cmd_output
 
     def cmd_exit(self, args):
         "Exit the application"

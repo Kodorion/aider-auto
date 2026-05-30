@@ -815,7 +815,7 @@ def get_scm_fname(lang):
             if path.exists():
                 return path
         except KeyError:
-            pass
+            return
 
     # Fall back to tree-sitter-languages
     subdir = "tree-sitter-languages"
@@ -828,6 +828,18 @@ def get_scm_fname(lang):
     except KeyError:
         return
 
+def get_doublon_query(lang):
+    """TCPE Phase 4 queries for structural integrity validation."""
+    QUERIES = {
+        "python": "(function_definition name: (identifier) @name) (class_definition name: (identifier) @name)",
+        "javascript": "(function_declaration name: (identifier) @name) (class_declaration name: (identifier) @name) (lexical_declaration (variable_declarator name: (identifier) @name))",
+        "typescript": "(function_declaration name: (identifier) @name) (class_declaration name: (type_identifier) @name) (lexical_declaration (variable_declarator name: (identifier) @name)) (interface_declaration name: (type_identifier) @name)",
+        "cpp": "(function_definition declarator: (function_declarator declarator: (identifier) @name parameters: (parameter_list) @params)) (class_specifier name: (type_identifier) @name)",
+        "rust": "(function_item name: (identifier) @name parameters: (parameters) @params) (struct_item name: (type_identifier) @name) (enum_item name: (type_identifier) @name)",
+        "dart": "(function_signature name: (identifier) @name parameters: (formal_parameter_list) @params) (class_definition name: (identifier) @name)",
+        "html": "(element (start_tag (attribute (attribute_name) @attr_name (#eq? @attr_name \"id\") (quoted_attribute_value) @name)))"
+    }
+    return QUERIES.get(lang)
 
 def get_supported_languages_md():
     from grep_ast.parsers import PARSERS

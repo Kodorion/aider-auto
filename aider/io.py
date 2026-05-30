@@ -813,7 +813,41 @@ class InputOutput:
         group=None,
         allow_never=False,
     ):
+        # --- YOLO MODE WHITELIST HACK ---
+        if question and "Run shell command" in question and subject:
+            safe_prefixes = [
+                "pytest", 
+                "cargo test", 
+                "cargo build", 
+                "cargo check", 
+                "cargo fmt",
+                "flutter test",
+                "dart test",
+                "python",
+                "pre-commit run --all-files",
+                "pre-commit",
+                "cat",
+                "dir",
+                "type",
+                "cd",
+                "add",
+                "pip install",
+                "black",
+                "ruff",
+                "mypy",
+                "radon",
+                "cargo",
+                "powershell -ExecutionPolicy Bypass"
+            ]
+            if any(subject.strip().startswith(prefix) for prefix in safe_prefixes):
+                self.tool_output(f"YOLO MODE Auto-Approving: {subject}")
+                return True
+        # --------------------------------
+
         self.num_user_asks += 1
+
+        # Ring the bell if needed
+        self.ring_bell()
 
         # Ring the bell if needed
         self.ring_bell()

@@ -52,7 +52,7 @@ from aider.waiting import WaitingSpinner
 
 from ..dump import dump  # noqa: F401
 from .chat_chunks import ChatChunks
-from aider.tcpe_engine import TCPEngine
+
 
 class UnknownEditFormat(ValueError):
     def __init__(self, edit_format, valid_formats):
@@ -87,41 +87,6 @@ all_fences = [
 
 
 class Coder:
-    # --- OUTPUT OPTIMIZATION EXCEPTIONS REGISTRY ---
-    # Easily extensible list of patterns to preserve full, unabridged shell run outputs.
-    OUTPUT_EXCEPTIONS = [
-        {
-            "pattern": "### High-Density Metrics & Trigger Breakdown",
-            "target": "output",
-            "type": "substring",
-            "description": "Preserve high-density execution metrics"
-        },
-        {
-            "pattern": "ENERGY BALANCE SHEET",
-            "target": "output",
-            "type": "substring",
-            "description": "Preserve structural thermodynamic calculations"
-        },
-        {
-            "pattern": "mut_run.py",
-            "target": "command",
-            "type": "substring",
-            "description": "Preserve mutation testing execution outputs"
-        },
-        {
-            "pattern": "fest ",
-            "target": "command",
-            "type": "substring",
-            "description": "Preserve custom fest testing outputs"
-        },
-        {
-            "pattern": "query_audit.py ",
-            "target": "command",
-            "type": "substring",
-            "description": "Preserve custom query_audit outputs"
-        }
-    ]
-
     abs_fnames = None
     abs_read_only_fnames = None
     repo = None
@@ -134,7 +99,7 @@ class Coder:
     num_malformed_responses = 0
     last_keyboard_interrupt = None
     num_reflections = 0
-    max_reflections = 50  # --- AUTONOMOUS LOOP FIX: Increased from 3 to 50
+    max_reflections = 3
     edit_format = None
     yield_stream = False
     temperature = None
@@ -378,8 +343,6 @@ class Coder:
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
 
-        self.tcpe = TCPEngine(io)
-        
         self.event = self.analytics.event
         self.chat_language = chat_language
         self.commit_language = commit_language
@@ -907,7 +870,6 @@ class Coder:
         self.test_outcome = None
         self.shell_commands = []
         self.message_cost = 0
-        self.req_changed = False
 
         if self.repo:
             self.commit_before_message.append(self.repo.get_head_commit_sha())
@@ -977,13 +939,10 @@ class Coder:
 
             if self.num_reflections >= self.max_reflections:
                 self.io.tool_warning(f"Only {self.max_reflections} reflections allowed, stopping.")
-                break
+                return
 
             self.num_reflections += 1
             message = self.reflected_message
-
-        self.tcpe.increment_turn_and_timeout(self.cur_messages)
-
 
     def check_and_open_urls(self, exc, friendly_msg=None):
         """Check exception for URLs, offer to open in a browser, with user-friendly error msgs."""
@@ -1149,11 +1108,11 @@ class Coder:
 
         # System locale
         try:
-            get_locale = locale.getlocale()[0]
-            if get_locale:
-                get_locale = self.normalize_language(get_locale)
-            if get_locale:
-                return get_locale
+            lang = locale.getlocale()[0]
+            if lang:
+                lang = self.normalize_language(lang)
+            if lang:
+                return lang
         except Exception:
             pass
 
@@ -1633,54 +1592,7 @@ class Coder:
             if not saved_message and hasattr(self.gpt_prompts, "files_content_gpt_edits_no_repo"):
                 saved_message = self.gpt_prompts.files_content_gpt_edits_no_repo
 
-            # ---- FIX: Do NOT clear the conversation if we have pending shell commands ----
-            if not self.shell_commands:
-                self.move_back_cur_messages(saved_message)
-            else:
-                # Keep the context alive – just confirm the edit as a user message
-                self.cur_messages.append(dict(role="user", content=saved_message or "Edits applied."))
-        if getattr(self, "req_changed", False):
-            print(f"DEBUG req_changed: moving {len(self.cur_messages)} cur messages to done")
-            # If we also have shell commands, run them first, then handle the file request.
-            if self.shell_commands:
-                # Save the file request info for later; don't move history yet
-                self._deferred_file_request = True
-            else:
-                self.io.tool_output(
-                    "\n[SYSTEM] File context changed via auto-add/drop. Auto-reflecting turn..."
-                )
-                self.reflected_message = (
-                    "[SYSTEM]: Requested files have been added to / dropped from "
-                    "the chat context. Please proceed with your analysis or code changes."
-                )
-                self.move_back_cur_messages("[SYSTEM]: Updated file context.")
-                return
-
-        # --- FIX: AUTONOMOUS SHELL COMMAND EXTRACTION & ERROR BYPASS ---
-        # 1. Extract commands from standard bash blocks even if the edit parser choked
-        import re
-        # We split the triple backticks into strings so Markdown parsers don't glitch out
-        block_pattern = r'``' + r'`(?:bash|sh|cmd)\n(.*?)\n``' + r'`'
-        extracted_cmds = re.findall(block_pattern, self.partial_response_content or "", re.DOTALL)
-        for cmd_block in extracted_cmds:
-            for cmd in cmd_block.splitlines():
-                cmd = cmd.strip()
-                if cmd and not cmd.startswith("#") and cmd not in self.shell_commands:
-                    self.shell_commands.append(cmd)
-        
-        # 2. Extract bare test commands that the LLM might have written without blocks
-        for line in (self.partial_response_content or "").splitlines():
-            line = line.strip()
-            if line.startswith("pytest ") or line.startswith("cargo test") or line.startswith("flutter test"):
-                if line not in self.shell_commands:
-                    self.shell_commands.append(line)
-
-        # 3. If we found commands, bypass the false-positive file edit error!
-        if self.reflected_message and self.shell_commands:
-            if "No filename provided" in self.reflected_message or "edit format" in self.reflected_message:
-                self.io.tool_output("\n[SYSTEM] Bypassing edit format error because diagnostic shell commands were detected.")
-                self.reflected_message = None  # Clear the error to let the commands run
-        # ---------------------------------------------------------------
+            self.move_back_cur_messages(saved_message)
 
         if self.reflected_message:
             return
@@ -1690,35 +1602,25 @@ class Coder:
             self.auto_commit(edited, context="Ran the linter")
             self.lint_outcome = not lint_errors
             if lint_errors:
-                 # --- AUTONOMOUS LOOP BYPASS ---
-                self.io.tool_output("\n[SYSTEM] Pipeline error detected. Bypassing Y/n prompt and auto-looping agent for fix...")
-                ok = True
-                # ------------------------------
+                ok = self.io.confirm_ask("Attempt to fix lint errors?")
                 if ok:
                     self.reflected_message = lint_errors
                     return
 
         shared_output = self.run_shell_commands()
         if shared_output:
+            # --- FIX: THE SILENT SLEEP BUG ---
+            # We do NOT want to append the output to chat history and reply "Ok".
+            # We want to force the LLM to reflect on the shell output and stay awake!
             self.reflected_message = shared_output
             return
-
-        if getattr(self, "_deferred_file_request", False):
-            self._deferred_file_request = False
-            self.io.tool_output("[SYSTEM] Applying deferred file context change...")
-            self.move_back_cur_messages("[SYSTEM]: Updated file context.")
-            self.reflected_message = "[SYSTEM]: File context updated. Continue your analysis."
-            return
-
+            # ---------------------------------
 
         if edited and self.auto_test:
             test_errors = self.commands.cmd_test(self.test_cmd)
             self.test_outcome = not test_errors
             if test_errors:
-                # --- AUTONOMOUS LOOP BYPASS ---
-                self.io.tool_output("\n[SYSTEM] Test error detected. Bypassing Y/n prompt and auto-looping agent for fix...")
-                ok = True
-                # ------------------------------
+                ok = self.io.confirm_ask("Attempt to fix test errors?")
                 if ok:
                     self.reflected_message = test_errors
                     return
@@ -1860,8 +1762,7 @@ class Coder:
         return mentioned_rel_fnames
 
     def check_for_file_mentions(self, content):
-        return
-        """mentioned_rel_fnames = self.get_file_mentions(content)
+        mentioned_rel_fnames = self.get_file_mentions(content)
 
         new_mentions = mentioned_rel_fnames - self.ignore_mentions
 
@@ -1881,7 +1782,7 @@ class Coder:
 
         if added_fnames:
             return prompts.added_files.format(fnames=", ".join(added_fnames))
-        """
+
     def send(self, messages, model=None, functions=None):
         self.got_reasoning_content = False
         self.ended_reasoning_content = False
@@ -2086,56 +1987,12 @@ class Coder:
         return self.get_multi_response_content_in_progress()
 
     def remove_reasoning_content(self):
-        """Remove reasoning content from the model's response, anchoring on <action_plan>."""
-        import re
-        from aider.reasoning_tags import remove_reasoning_content as strip_tags
+        """Remove reasoning content from the model's response."""
 
-        content = self.partial_response_content or ""
-
-        # ==========================================================
-        # 1. ACTION PLAN ANCHOR (THE ULTIMATE FAIL-SAFE)
-        # If the model output contains "<action_plan>", everything before it is guaranteed
-        # to be thinking/reasoning content, regardless of whether tags were closed or even emitted.
-        # This resolves the eaten-open-tag and missing delimiters bugs flawlessly.
-        # ==========================================================
-        if "<action_plan>" in content:
-            parts = content.split("<action_plan>", 1)
-            content = "<action_plan>" + parts[1]
-            self.partial_response_content = content.strip()
-            return
-
-        # ==========================================================
-        # 2. FALLBACK TAG STRIPPING (If interrupted/cut off before <action_plan> was printed)
-        # ==========================================================
-        for tag in (self.reasoning_tag_name, "think"):
-            if not tag:
-                continue
-            content = strip_tags(content, tag)
-
-        # Handle the eaten open tag (starts generating reasoning directly, has closing tag)
-        for tag in (self.reasoning_tag_name, "think"):
-            if not tag:
-                continue
-            close_tag = f"</{tag}>"
-            if close_tag in content:
-                parts = content.split(close_tag, 1)
-                content = parts[1].strip()
-
-        # Handle unclosed open tags (interrupted mid-thought)
-        for tag in (self.reasoning_tag_name, "think"):
-            if not tag:
-                continue
-            open_tag = f"<{tag}>"
-            if open_tag in content:
-                content = re.sub(rf"<{re.escape(tag)}>.*$", "", content, flags=re.DOTALL).strip()
-
-        # Clean up any leftover orphaned tags
-        for tag in (self.reasoning_tag_name, "think"):
-            if not tag:
-                continue
-            content = content.replace(f"<{tag}>", "").replace(f"</{tag}>", "")
-
-        self.partial_response_content = content.strip()
+        self.partial_response_content = remove_reasoning_content(
+            self.partial_response_content,
+            self.reasoning_tag_name,
+        )
 
     def calculate_and_show_tokens_and_cost(self, messages, completion=None):
         prompt_tokens = 0
@@ -2226,11 +2083,11 @@ class Coder:
 
         # deepseek
         # prompt_cache_hit_tokens + prompt_cache_miss_tokens
-        #   == prompt_tokens == total tokens that were sent
+        #    == prompt_tokens == total tokens that were sent
         #
         # Anthropic
         # cache_creation_input_tokens + cache_read_input_tokens + prompt
-        #   == total tokens that were
+        #    == total tokens that were
 
         if input_cost_per_token_cache_hit:
             # must be deepseek
@@ -2317,7 +2174,7 @@ class Coder:
         inchat_files = set(self.get_inchat_relative_files())
         read_only_files = set(self.get_rel_fname(fname) for fname in self.abs_read_only_fnames)
         return all_files - inchat_files - read_only_files
-    """
+
     def check_for_dirty_commit(self, path):
         if not self.repo:
             return
@@ -2329,7 +2186,7 @@ class Coder:
         # We need a committed copy of the file in order to /undo, so skip this
         # fullp = Path(self.abs_root_path(path))
         # if not fullp.stat().st_size:
-        #      return
+        #     return
 
         self.io.tool_output(f"Committing {path} before applying edits.")
         self.need_commit_before_edits.add(path)
@@ -2341,7 +2198,7 @@ class Coder:
         else:
             need_to_add = False
 
-        full_path in self.abs_fnames:
+        if full_path in self.abs_fnames:
             self.check_for_dirty_commit(path)
             return True
 
@@ -2376,72 +2233,6 @@ class Coder:
             self.io.tool_output(f"Skipping edits to {path}")
             return
 
-        if need_to_add and self.auto_commits:
-            self.repo.repo.git.add(full_path)
-
-        self.abs_fnames.add(full_path)
-        self.check_added_files()
-        self.check_for_dirty_commit(path)
-
-        return True
-
-    warning_given = False
-    """
-
-    def check_for_dirty_commit(self, path):
-        if not self.repo:
-            return
-        if not self.dirty_commits:
-            return
-        if not self.repo.is_dirty(path):
-            return
-
-        # We need a committed copy of the file in order to /undo, so skip this
-        # fullp = Path(self.abs_root_path(path))
-        # if not fullp.stat().st_size:
-        #        return
-
-        self.io.tool_output(f"Committing {path} before applying edits.")
-        self.need_commit_before_edits.add(path)
-
-    def allowed_to_edit(self, path):
-        full_path = self.abs_root_path(path)
-        if self.repo:
-            need_to_add = not self.repo.path_in_repo(path)
-        else:
-            need_to_add = False
-
-        if full_path in self.abs_fnames:
-            self.check_for_dirty_commit(path)
-            return True
-
-        if self.repo and self.repo.git_ignored_file(path):
-            self.io.tool_warning(f"Skipping edits to {path} that matches gitignore spec.")
-            return
-
-        # --- AUTONOMOUS LOOP BYPASS: Auto-create non-existent files ---
-        if not Path(full_path).exists():
-            self.io.tool_output(f"\n[SYSTEM] Auto-approving creation of new file: {path}")
-            if not self.dry_run:
-                # Ensure parent directories exist before touching the file
-                try:
-                    Path(full_path).parent.mkdir(parents=True, exist_ok=True)
-                except OSError as e:
-                    self.io.tool_error(f"Unable to create directories for {path}: {e}")
-                    return
-
-                if not utils.touch_file(full_path):
-                    self.io.tool_error(f"Unable to create {path}, skipping edits.")
-                    return
-                if need_to_add and self.auto_commits:
-                    self.repo.repo.git.add(full_path)
-
-            self.abs_fnames.add(full_path)
-            self.check_added_files()
-            return True
-
-        # --- AUTONOMOUS LOOP BYPASS: Auto-add existing files not in chat ---
-        self.io.tool_output(f"\n[SYSTEM] Auto-adding file to chat context: {path}")
         if need_to_add and self.auto_commits:
             self.repo.repo.git.add(full_path)
 
@@ -2506,8 +2297,6 @@ class Coder:
         return res
 
     def apply_updates(self):
-        self.req_changed = self.auto_manage_custom_file_requests(self.partial_response_content)
-
         edited = set()
         try:
             edits = self.get_edits()
@@ -2649,97 +2438,50 @@ class Coder:
         if not self.suggest_shell_commands:
             return ""
 
-        # --- FIX: FLATTEN & DEDUPLICATE ALL COMMANDS ---
-        # This prevents the "ran twice" bug by breaking all blocks into single lines 
-        # and strictly enforcing uniqueness before any execution happens.
-        flat_commands = []
-        for cmd_str in self.shell_commands:
-            for line in cmd_str.strip().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and line not in flat_commands:
-                    flat_commands.append(line)
-
-        # --- CLEAR PENDING COMMANDS ---
-        # This fixes the loop bug! We must empty the list so old commands 
-        # don't carry over into the next autonomous reflection turn.
-        self.shell_commands = []
-
-        if not flat_commands:
-            return ""
-
-        # Combine all unique commands into one block so Aider only asks/runs once
-        commands_str = "\n".join(flat_commands)
-        group = ConfirmGroup([commands_str])
-        
-        output = self.handle_shell_commands(commands_str, group)
-        return output or ""
-
-    def check_output_exceptions(self, commands, accumulated_output):
-        """
-        Evaluate executed commands and output against registered rules (case-insensitive).
-        Returns (True, description) if matched, otherwise (False, None).
-        """
-        for rule in self.OUTPUT_EXCEPTIONS:
-            pattern = rule["pattern"].lower()
-            target = rule["target"]
-            desc = rule["description"]
-
-            # Match executed command strings
-            if target in ("command", "either"):
-                for cmd in commands:
-                    if pattern in cmd.lower():
-                        return True, desc
-
-            # Match actual output content
-            if target in ("output", "either"):
-                if pattern in accumulated_output.lower():
-                    return True, desc
-
-        return False, None
+        done = set()
+        group = ConfirmGroup(set(self.shell_commands))
+        accumulated_output = ""
+        for command in self.shell_commands:
+            if command in done:
+                continue
+            done.add(command)
+            output = self.handle_shell_commands(command, group)
+            if output:
+                accumulated_output += output + "\n\n"
+        return accumulated_output
 
     def handle_shell_commands(self, commands_str, group):
         commands = commands_str.strip().splitlines()
-        command_count = len(commands)
-        
-        # --- SAFE COMMAND AUTO-APPROVE ---
-        is_safe = True
-        safe_prefixes = ("pytest", "cargo test", "flutter test", "dart test", "python")
-        for cmd in commands:
-            cmd = cmd.strip()
-            if not cmd.startswith(safe_prefixes):
-                is_safe = False
-                break
-                
-        if is_safe and command_count > 0:
-            self.io.tool_output("\n[SYSTEM] Auto-approving safe diagnostic test command...")
-        else:
-            prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
-            if not self.io.confirm_ask(
-                prompt,
-                subject="\n".join(commands),
-                explicit_yes_required=True,
-                group=group,
-                allow_never=True,
-            ):
-                return
+        command_count = sum(
+            1 for cmd in commands if cmd.strip() and not cmd.strip().startswith("#")
+        )
+        prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
+        if not self.io.confirm_ask(
+            prompt,
+            subject="\n".join(commands),
+            explicit_yes_required=True,
+            group=group,
+            allow_never=True,
+        ):
+            return
 
         accumulated_output = ""
         overall_exit_status = 0  
 
-        import os
-        from pathlib import Path
+        # --- WINDOWS/UNIX POLYFILL ---
         if os.name == "nt":
             git_usr_bin = r"C:\Program Files\Git\usr\bin"
             if git_usr_bin not in os.environ.get("PATH", "") and Path(git_usr_bin).exists():
                 os.environ["PATH"] += os.pathsep + git_usr_bin
 
-        import shlex
-        from aider.run_cmd import run_cmd
-        
         for command in commands:
+            command = command.strip()
+            if not command or command.startswith("#"):
+                continue
+
             self.io.tool_output()
             self.io.tool_output(f"Running {command}")
-            self.io.add_to_input_history(f"/run {command}")
+            self.io.add_to_input_history(f"/run {command.strip()}")
             
             exit_status, output = run_cmd(command, error_print=self.io.tool_error, cwd=self.root)
             
@@ -2750,9 +2492,10 @@ class Coder:
                 accumulated_output += f"Output from {command}\n{output}\n"
 
         if not accumulated_output.strip():
-            return ""
+            return
 
-        MAX_RAW_LENGTH = 1 * 1024 * 1024 
+        # --- OOM SAFETY NET (Prevents token_count from freezing on massive logs) ---
+        MAX_RAW_LENGTH = 1 * 1024 * 1024  # 1MB hard cap before tokenization
         if len(accumulated_output) > MAX_RAW_LENGTH:
             self.io.tool_output(f"[System] Warning: Output massive ({len(accumulated_output)//1024//1024}MB). Hard-truncating before analysis.")
             accumulated_output = (
@@ -2761,13 +2504,19 @@ class Coder:
                 accumulated_output[-512*1024:]
             )
 
+        # --- UNIVERSAL LANGUAGE-AGNOSTIC EXTRACTOR ---
+        
         token_count = self.main_model.token_count(accumulated_output)
         
+        # 1. Check if command is a read command
         read_tools = {"cat", "grep", "rg", "ls", "find", "head", "tail", "git", "awk", "sed"}
         wrappers = {"sudo", "time", "env", "stdbuf", "nohup", "timeout", "xargs"}
         is_read_cmd = False
         
         for cmd in commands:
+            cmd = cmd.strip()
+            if not cmd or cmd.startswith("#"):
+                continue
             try:
                 cmd_parts = shlex.split(cmd)
                 for part in cmd_parts:
@@ -2781,6 +2530,7 @@ class Coder:
             except ValueError:
                 pass
 
+        # 2. Save full log to disk for fallback
         import shutil
         log_file_name = ".aider.run.last.log"
         prev_log_name = ".aider.run.prev.log"
@@ -2789,26 +2539,22 @@ class Coder:
         
         try:
             if log_file_path.exists():
-                shlex_val = shutil.move(str(log_file_path), str(prev_log_path))
+                shutil.move(str(log_file_path), str(prev_log_path))
             with open(log_file_path, "w", encoding="utf-8", errors="replace") as f:
                 f.write(accumulated_output)
         except Exception as e:
             self.io.tool_output(f"[System] Error saving log dump: {e}")
 
-        ERROR_BUDGET_TOKENS = 4000  
+        # 3. Dynamic Token Budgeting
+        ERROR_BUDGET_TOKENS = 4000  # Strict budget (approx 16,000 chars)
         processed_output = ""
 
-        # Check matched bypass exceptions first (Total skip behavior)
-        bypass_optimization, reason = self.check_output_exceptions(commands, accumulated_output)
-
-        if bypass_optimization:
-            self.io.tool_output(f"\n[SYSTEM] Optimization Exception matched: {reason}. Skipping all log compression & optimizations.")
-            processed_output = accumulated_output
-
-        elif token_count <= ERROR_BUDGET_TOKENS:
+        if token_count <= ERROR_BUDGET_TOKENS:
+            # Fits in budget. Send the whole thing. (Allows normal cat/grep to pass through)
             processed_output = accumulated_output
             
         elif overall_exit_status == 0:
+            # --- OVER BUDGET BUT SUCCEEDED ---
             lines = accumulated_output.splitlines()
             if is_read_cmd:
                 head = "\n".join(lines[:100])
@@ -2818,6 +2564,7 @@ class Coder:
                     f"Command succeeded. Output too large, showing first 100 lines."
                 )
             else:
+                # For Pytest successes: ONLY grab the last 10 lines for the summary. Costs ~20 tokens.
                 tail = "\n".join(lines[-10:])
                 processed_output = (
                     f"... [ALL LOGS OMITTED - COMMAND SUCCEEDED PERFECTLY] ...\n\n{tail}\n\n"
@@ -2826,40 +2573,10 @@ class Coder:
                 )
                 
         else:
-            import re
+            # MASSIVE LOG & FAILED: Smart Zone Extraction
             lines = accumulated_output.splitlines()
             
-            # --- UNIVERSAL COMPRESSION (BEFORE SPLITTING) ---
-            # Compress the entire log *before* splitting into head/tail to prevent Tail Block Immunity
-            if "dart:" in accumulated_output or "package:flutter" in accumulated_output:
-                noisy_pkgs = r"(flutter(?:_[a-z_]+)?|riverpod|flutter_riverpod|test_api|fake_async|clock|stream_channel|stack_trace|test_core|matcher)"
-                framework_pattern = re.compile(rf"^\s*#\d+\s+.*?\((?:package:{noisy_pkgs}/|dart:[a-z0-9_-]+[:/])", re.IGNORECASE)
-                mounting_pattern = re.compile(r"^\s*\.\.\.\s+Normal element mounting")
-                elided_pattern = re.compile(r"^\s*\(\s*elided .* frames? from ")
-                async_pattern = re.compile(r"^\s*<asynchronous suspension>")
-
-                compressed_lines = []
-                omitted_frames = 0
-                for line in lines:
-                    is_framework_trace = bool(re.match(r"^\s*#\d+\s+", line) and framework_pattern.search(line))
-                    is_mounting = bool(mounting_pattern.search(line))
-                    is_elided = bool(elided_pattern.search(line))
-                    is_async = bool(async_pattern.search(line))
-
-                    if is_framework_trace or is_mounting or is_elided or is_async:
-                        omitted_frames += 1
-                    else:
-                        if omitted_frames > 0:
-                            compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
-                            omitted_frames = 0
-                        compressed_lines.append(line)
-                if omitted_frames > 0:
-                    compressed_lines.append(f"    ... [{omitted_frames} Flutter/Dart internal stack frames omitted] ...")
-                
-                lines = compressed_lines
-                accumulated_output = "\n".join(lines)
-            # ------------------------------------------------
-
+            # 1. Ultra-Minimal Head & Tail
             HEAD_LINES = 10
             TAIL_LINES = 15
             
@@ -2870,45 +2587,57 @@ class Coder:
                 tail_block = lines[-TAIL_LINES:]
                 middle_lines = lines[HEAD_LINES:-TAIL_LINES]
                 
-                # UPDATED: Added "survived", "survivor", "mutant" to explicitly catch mutation testing outputs
+                # 2. Universal Hot Zone Detection
+                # Added word boundaries to prevent catching things like "test_chat_completion_generic_exception"
                 ERROR_PATTERN = re.compile(
-                    r"(?i)(\berror\b|\bexception\b|\bfail(ed|ures?)?\b|traceback|panic|fatal|stderr|^E\s{1,}|segfault|segmentation fault|unhandled rejection|══╡ EXCEPTION CAUGHT BY|\bsurvived?\b|\bsurvivors?\b|\bmutants?\b)"
+                    r"(?i)(\berror\b|\bexception\b|\bfail(ed|ures?)?\b|traceback|panic|fatal|stderr|^E\s{1,}|segfault|segmentation fault|unhandled rejection)"
                 )
                 TRACEBACK_PATTERN = re.compile(
                     r"(?i)(file\s+[\"'].+?[\"'],\s+line\s+\d+|:\d+:\d+:|^\s*at\s+|^\s*#\d+\s+)"
                 )
+                # Safely identify Pytest "PASSED" lines to prevent false positives from test names
                 PASS_PATTERN = re.compile(r"PASSED\s+(\[\s*\d+%\s*\])?\s*$")
                 
                 error_zones = []
                 for i, line in enumerate(middle_lines):
+                    # Prevent test-names in successful tests from triggering a false positive
                     if PASS_PATTERN.search(line.strip()):
                         continue
+
                     if ERROR_PATTERN.search(line) or TRACEBACK_PATTERN.search(line):
+                        # Tightened padding to prevent massive chain-merges across 800 tests
                         error_zones.append([max(0, i - 10), min(len(middle_lines), i + 15)])
                         
+                # 3. Merge overlapping zones
                 merged_zones = []
                 for zone in sorted(error_zones):
                     if not merged_zones:
                         merged_zones.append(zone)
                     else:
                         prev_start, prev_end = merged_zones[-1]
+                        # Tighter merge gap: errors must be within 8 lines to merge
                         if zone[0] <= prev_end + 8: 
                             merged_zones[-1][1] = max(prev_end, zone[1])
                         else:
                             merged_zones.append(zone)
                             
+                # 4. Fill Budget entirely via the Hot Zones (BOTTOM-UP PRIORITY)
                 middle_extracted = []
-                MIDDLE_BUDGET_CHARS = 15000 
+                MIDDLE_BUDGET_CHARS = 15000 # Give almost the entire budget (~3500 tokens) to the smart extractor
                 chars_used = 0
+                
+                # Keep track of which zones we actually have room for
                 kept_zones = []
                 
+                # Read backwards so the final Pytest summaries and ultimate crashes ALWAYS survive
                 for start, end in reversed(merged_zones):
                     zone_chars = sum(len(l) for l in middle_lines[start:end])
                     if chars_used + zone_chars > MIDDLE_BUDGET_CHARS and kept_zones:
-                        break 
+                        break # Stop if we exceed budget (but ensure at least 1 zone if possible)
                     kept_zones.append((start, end))
                     chars_used += zone_chars
                 
+                # Sort them back into chronological order
                 kept_zones.reverse()
                 
                 last_end = 0
@@ -2934,6 +2663,7 @@ class Coder:
                     f"Log optimized to fit context limits. Full unabridged log is in `{log_file_name}`."
                 )
                 
+                # Report extraction stats
                 new_toks = self.main_model.token_count(processed_output)
                 reduction = ((token_count - new_toks) / max(1, token_count)) * 100
                 sys_msg = f"[System] Log over budget ({token_count} tokens). Extracted {len(kept_zones)} relevant error zones from middle. Reduced by {reduction:.1f}%."
@@ -2946,159 +2676,3 @@ class Coder:
         line_plural = "line" if num_lines == 1 else "lines"
         self.io.tool_output(f"Added {num_lines} {line_plural} of targeted output to the chat.")
         return accumulated_output
-
-
-    def check_for_dirty_commit(self, path):
-        if not self.repo:
-            return
-        if not self.dirty_commits:
-            return
-        if not self.repo.is_dirty(path):
-            return
-
-        # We need a committed copy of the file in order to /undo, so skip this
-        # fullp = Path(self.abs_root_path(path))
-        # if not fullp.stat().st_size:
-        #        return
-
-        self.io.tool_output(f"Committing {path} before applying edits.")
-        self.need_commit_before_edits.add(path)
-
-    def allowed_to_edit(self, path):
-        full_path = self.abs_root_path(path)
-        if self.repo:
-            need_to_add = not self.repo.path_in_repo(path)
-        else:
-            need_to_add = False
-
-        if full_path in self.abs_fnames:
-            self.check_for_dirty_commit(path)
-            return True
-
-        if self.repo and self.repo.git_ignored_file(path):
-            self.io.tool_warning(f"Skipping edits to {path} that matches gitignore spec.")
-            return
-
-        # --- AUTONOMOUS LOOP BYPASS: Auto-create non-existent files ---
-        if not Path(full_path).exists():
-            self.io.tool_output(f"\n[SYSTEM] Auto-approving creation of new file: {path}")
-            if not self.dry_run:
-                # Ensure parent directories exist before touching the file
-                try:
-                    Path(full_path).parent.mkdir(parents=True, exist_ok=True)
-                except OSError as e:
-                    self.io.tool_error(f"Unable to create directories for {path}: {e}")
-                    return
-
-                if not utils.touch_file(full_path):
-                    self.io.tool_error(f"Unable to create {path}, skipping edits.")
-                    return
-                if need_to_add and self.auto_commits:
-                    self.repo.repo.git.add(full_path)
-
-            self.abs_fnames.add(full_path)
-            self.check_added_files()
-            return True
-
-        # --- AUTONOMOUS LOOP BYPASS: Auto-add existing files not in chat ---
-        self.io.tool_output(f"\n[SYSTEM] Auto-adding file to chat context: {path}")
-        if need_to_add and self.auto_commits:
-            self.repo.repo.git.add(full_path)
-
-        self.abs_fnames.add(full_path)
-        self.check_added_files()
-        self.check_for_dirty_commit(path)
-
-        return True
-
-    warning_given = False
-
-    def auto_manage_custom_file_requests(self, content):
-        """
-        Custom Autonomous File Manager for Aider.
-        Strictly parses <file_request> and <file_drop> tags.
-        """
-        if not content:
-            return False
-
-        import re
-        import os
-        from pathlib import Path
-
-        state_changed = False
-
-        # ==========================================
-        # 1. AUTO-DROP: Extract <file_drop>
-        # ==========================================
-        drop_match = re.search(r'<file_drop>(.*?)</file_drop>', content, re.DOTALL)
-        if drop_match:
-            # Replace backticks and quotes with spaces to grab space-separated paths
-            raw_drop_content = drop_match.group(1).replace('`', ' ').replace('"', ' ').replace("'", ' ')
-            drop_paths = [p.strip() for p in raw_drop_content.split() if p.strip()]
-
-            for word in drop_paths:
-                expanded_word = os.path.expanduser(word)
-
-                read_only_matched = []
-                if hasattr(self, 'abs_read_only_fnames'):
-                    for f in self.abs_read_only_fnames:
-                        if expanded_word in f:
-                            read_only_matched.append(f)
-                            continue
-                        try:
-                            if os.path.samefile(os.path.abspath(expanded_word), f):
-                                read_only_matched.append(f)
-                        except (FileNotFoundError, OSError):
-                            continue
-
-                    for matched_file in read_only_matched:
-                        self.abs_read_only_fnames.remove(matched_file)
-                        self.io.tool_output(f"[-] Auto-dropped read-only file {matched_file}")
-                        state_changed = True
-
-                matched_files = [
-                    self.get_rel_fname(f) for f in self.abs_fnames if expanded_word in f
-                ]
-                if not matched_files:
-                    matched_files.append(expanded_word)
-
-                for matched_file in matched_files:
-                    abs_fname = self.abs_root_path(matched_file)
-                    if abs_fname in self.abs_fnames:
-                        self.abs_fnames.remove(abs_fname)
-                        self.io.tool_output(f"[-] Auto-dropped {matched_file}")
-                        state_changed = True
-
-        # ==========================================
-        # 2. STRICT AUTO-ADD: Extract <file_request>
-        # ==========================================
-        req_match = re.search(r'<file_request>(.*?)</file_request>', content, re.DOTALL)
-        if not req_match:
-            return state_changed
-
-        # Replace backticks and quotes to easily parse space-separated paths
-        raw_req_content = req_match.group(1).replace('`', ' ').replace('"', ' ').replace("'", ' ')
-        req_paths = [p.strip() for p in raw_req_content.split() if p.strip()]
-
-        # ==========================================
-        # 3. ROUTER: Existence only
-        # ==========================================
-        for path_str in req_paths:
-            abs_path = self.abs_root_path(path_str)
-            path_obj = Path(abs_path)
-
-            # Skip if already in context
-            if abs_path in self.abs_fnames:
-                continue
-
-            # Condition A: File exists
-            if path_obj.exists():
-                self.abs_fnames.add(abs_path)
-                self.io.tool_output(f"[+] Auto-added existing file: {path_str}")
-                state_changed = True
-                continue
-
-            # Non-existent files are intentionally NOT created here anymore.
-            # Creation safety is handled cleanly inside Aider's `allowed_to_edit` hook,
-            # which is only triggered after a valid search/replace edit block has been parsed.
-        return state_changed

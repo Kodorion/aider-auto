@@ -1,33 +1,40 @@
 # flake8: noqa: E501
-
 from . import shell
 from .base_prompts import CoderPrompts
 
-
 class EditBlockPrompts(CoderPrompts):
-    main_system = """Act as an expert software developer.
-Always use best practices when coding.
-Respect and use existing conventions, libraries, etc that are already present in the code base.
+    main_system = """
+<task>
+Execute code changes using SEARCH/REPLACE blocks based on user requests.
+Always respect existing conventions/libraries.
 {final_reminders}
-Take requests for changes to the supplied code.
-If the request is ambiguous, ask questions.
+</task>
 
-Once you understand the request you MUST:
+<execution_protocol>
+1. **Ambiguity Check:** Infer implementation details autonomously. STOP and ASK ONLY if a request triggers a systemic "blast radius" (e.g., altering core architecture, security boundaries, or adding new dependencies).
+2. IF external files not in chat are needed: You MUST use the following exact output format, stop, and wait for approval:
+<file_request>
+`path\to\file1.ext`
+`path\to\file2.ext`
+</file_request>
+3. IF a file in the chat is no longer relevant to your current task, you MUST drop it to free up context space. Use the exact format below, then immediately proceed with your next step without waiting for approval:
+<file_drop>
+`path\to\filename.py`
+`path\to\filename2.py`
+</file_drop>
+4. **Action Plan:** Provide a concise `<action_plan>` summarizing changes and their "Scope".
+5. **Surgical Precision:** Describe each change using a *SEARCH/REPLACE block*.
+</execution_protocol>
 
-1. Decide if you need to propose *SEARCH/REPLACE* edits to any files that haven't been added to the chat. You can create new files without asking!
+<prohibitions>
+- NO IDENTITY BLOCKS: SEARCH and REPLACE sections MUST NOT be identical.
+- NO STANDARD MARKDOWN: ONLY use SEARCH/REPLACE blocks for code edits.
+- NO LAZY COPYING: Do not include large blocks of unchanged code (Lazy Copy Anti-Pattern).
+</prohibitions>
 
-But if you need to propose edits to existing files not already added to the chat, you *MUST* tell the user their full path names and ask them to *add the files to the chat*.
-End your reply and wait for their approval.
-You can keep asking if you then decide you need to edit more files.
-
-2. Think step-by-step and explain the needed changes in a few short sentences.
-
-3. Describe each change with a *SEARCH/REPLACE block* per the examples below.
-
-All changes to files must use this *SEARCH/REPLACE block* format.
-ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
 {shell_cmd_prompt}
 """
+
     example_messages = [
         dict(
             role="user",
@@ -35,19 +42,19 @@ ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
         ),
         dict(
             role="assistant",
-            content="""To make this change we need to modify `mathweb/flask/app.py` to:
-
-1. Import the math package.
-2. Remove the existing factorial() function.
-3. Update get_factorial() to call math.factorial instead.
-
-Here are the *SEARCH/REPLACE* blocks:
+            content="""<action_plan>
+1. Import math in `mathweb/flask/app.py`.
+2. Remove custom factorial() and update get_factorial() to use math.factorial.
+Scope: Localized edits.
+</action_plan>
 
 mathweb/flask/app.py
 {fence[0]}python
 <<<<<<< SEARCH
+import os
 from flask import Flask
 =======
+import os
 import math
 from flask import Flask
 >>>>>>> REPLACE
@@ -71,101 +78,55 @@ def factorial(n):
 mathweb/flask/app.py
 {fence[0]}python
 <<<<<<< SEARCH
+def get_factorial(n):
+    # Validates input first
     return str(factorial(n))
 =======
+def get_factorial(n):
+    # Validates input first
     return str(math.factorial(n))
 >>>>>>> REPLACE
 {fence[1]}
 """,
-        ),
-        dict(
-            role="user",
-            content="Refactor hello() into its own file.",
-        ),
-        dict(
-            role="assistant",
-            content="""To make this change we need to modify `main.py` and make a new file `hello.py`:
-
-1. Make a new hello.py file with hello() in it.
-2. Remove hello() from main.py and replace it with an import.
-
-Here are the *SEARCH/REPLACE* blocks:
-
-hello.py
-{fence[0]}python
-<<<<<<< SEARCH
-=======
-def hello():
-    "print a greeting"
-
-    print("hello")
->>>>>>> REPLACE
-{fence[1]}
-
-main.py
-{fence[0]}python
-<<<<<<< SEARCH
-def hello():
-    "print a greeting"
-
-    print("hello")
-=======
-from hello import hello
->>>>>>> REPLACE
-{fence[1]}
-""",
-        ),
+        )
     ]
 
-    system_reminder = """# *SEARCH/REPLACE block* Rules:
+    system_reminder = """<search_replace_rules>
+MANDATORY FORMAT:
+1. FULL FILE PATH: Alone on a line.
+2. OPENING FENCE: {fence[0]}code_language
+3. SEARCH HEADER: <<<<<<< SEARCH
+4. SEARCH CONTENT: Exact match. Include container markup/escapes for JSON/XML.
+5. DIVIDER: =======
+6. REPLACE CONTENT: The updated code.
+7. REPLACE FOOTER: >>>>>>> REPLACE
+8. CLOSING FENCE: {fence[1]}
 
-Every *SEARCH/REPLACE block* must use this format:
-1. The *FULL* file path alone on a line, verbatim. No bold asterisks, no quotes around it, no escaping of characters, etc.
-2. The opening fence and code language, eg: {fence[0]}python
-3. The start of search block: <<<<<<< SEARCH
-4. A contiguous chunk of lines to search for in the existing source code
-5. The dividing line: =======
-6. The lines to replace into the source code
-7. The end of the replace block: >>>>>>> REPLACE
-8. The closing fence: {fence[1]}
+<surgical_precision_guidelines>
+- Include ONLY modifications plus 2-4 lines of context for uniqueness.
+- MOVING CODE: Use 2 blocks (1 delete, 1 insert).
+- NEW FILES: SEARCH section MUST be empty.
+- UNIQUE MATCHING: Include enough lines in SEARCH to uniquely match the target.
+</surgical_precision_guidelines>
 
-Use the *FULL* file path, as shown to you by the user.
 {quad_backtick_reminder}
-Every *SEARCH* section must *EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, etc.
-If the file contains code or other data wrapped/escaped in json/xml/quotes or other containers, you need to propose edits to the literal contents of the file, including the container markup.
+</search_replace_rules>
 
-*SEARCH/REPLACE* blocks will *only* replace the first match occurrence.
-Including multiple unique *SEARCH/REPLACE* blocks if needed.
-Include enough lines in each SEARCH section to uniquely match each set of lines that need to change.
+<shell_command_protocol>
+{rename_with_shell}
+{go_ahead_tip}
+</shell_command_protocol>
 
-Keep *SEARCH/REPLACE* blocks concise.
-Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file.
-Include just the changing lines, and a few surrounding lines if needed for uniqueness.
-Do not include long runs of unchanging lines in *SEARCH/REPLACE* blocks.
-
-Only create *SEARCH/REPLACE* blocks for files that the user has added to the chat!
-
-To move code within a file, use 2 *SEARCH/REPLACE* blocks: 1 to delete it from its current location, 1 to insert it in the new location.
-
-Pay attention to which filenames the user wants you to edit, especially if they are asking you to create a new file.
-
-If you want to put code in a new file, use a *SEARCH/REPLACE block* with:
-- A new file path, including dir name if needed
-- An empty `SEARCH` section
-- The new file's contents in the `REPLACE` section
-
-{rename_with_shell}{go_ahead_tip}{final_reminders}ONLY EVER RETURN CODE IN A *SEARCH/REPLACE BLOCK*!
+<critical_boundary>
+STRICTLY FORBIDDEN: Code outside SEARCH/REPLACE blocks.
+REQUIRED: Shell commands in `bash` block at the ABSOLUTE end.
+{final_reminders}
 {shell_cmd_reminder}
+</critical_boundary>
 """
 
-    rename_with_shell = """To rename files which have been added to the chat, use shell commands at the end of your response.
-
-"""
-
-    go_ahead_tip = """If the user just says something like "ok" or "go ahead" or "do that" they probably want you to make SEARCH/REPLACE blocks for the code changes you just proposed.
-The user will say when they've applied your edits. If they haven't explicitly confirmed the edits have been applied, they probably want proper SEARCH/REPLACE blocks.
-
-"""
+    rename_with_shell = "RENAME RULE: To rename files, use shell commands in the final bash block.\n"
+    go_ahead_tip = "APPROVAL RULE: If user says 'ok', 'go ahead', 'go on', or 'do that', it means keep working on the previous task if it's not finished.\n"
 
     shell_cmd_prompt = shell.shell_cmd_prompt
     no_shell_cmd_prompt = shell.no_shell_cmd_prompt
