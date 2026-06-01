@@ -137,6 +137,4 @@ Because this logic was AI-generated, there are a few unresolved edge cases curre
 
 Windows bash Reliance: The agent is instructed to output commands inside ```bash code blocks. However, the execution environment expects this to function correctly natively. This was developed and tested on a Windows environment, so executing shell commands heavily relies on how Windows interprets the bash commands (or falls back appropriately).
 
-Phantom LLM Calls: There is an active bug where if the agent attempts to run a shell command AND requests to add a file (<file_request>) in the exact same response, a "phantom" secondary LLM generation call is triggered silently in the background. Workaround: Avoid combining shell commands and file requests in a single prompt response.
-
 Single-Word Replies: We don’t know if it’s caused by the use of local quantized LLMs or from our changes, but sometimes the agent replies with a single word and needs manual input to restart the loop.

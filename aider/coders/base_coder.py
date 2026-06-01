@@ -1629,32 +1629,69 @@ class Coder:
         if edited:
             self.aider_edited_files.update(edited)
             saved_message = self.auto_commit(edited)
-
             if not saved_message and hasattr(self.gpt_prompts, "files_content_gpt_edits_no_repo"):
                 saved_message = self.gpt_prompts.files_content_gpt_edits_no_repo
 
-            # ---- FIX: Do NOT clear the conversation if we have pending shell commands ----
-            if not self.shell_commands:
-                self.move_back_cur_messages(saved_message)
-            else:
-                # Keep the context alive – just confirm the edit as a user message
-                self.cur_messages.append(dict(role="user", content=saved_message or "Edits applied."))
-        if getattr(self, "req_changed", False):
-            print(f"DEBUG req_changed: moving {len(self.cur_messages)} cur messages to done")
-            # If we also have shell commands, run them first, then handle the file request.
-            if self.shell_commands:
-                # Save the file request info for later; don't move history yet
-                self._deferred_file_request = True
-            else:
-                self.io.tool_output(
-                    "\n[SYSTEM] File context changed via auto-add/drop. Auto-reflecting turn..."
+             # Always keep the full conversation – just append the confirmation
+            self.cur_messages.append(
+                dict(role="user", content=saved_message or "Edits applied.")
+            )
+
+         # Detect any <file_request> in the latest assistant message, even if no files were actually added
+        last_msg = self.cur_messages[-1] if self.cur_messages else None
+        file_request_found = False
+        if last_msg and last_msg["role"] == "assistant":
+            import re
+            match = re.search(r"<file_request>(.*?)</file_request>", last_msg["content"], re.DOTALL)
+            if match:
+                file_request_found = True
+                raw = match.group(1)
+                requested = [f.strip() for f in raw.split() if f.strip()]
+                added = []
+                already = []
+                for fname in requested:
+                    abs_fname = self.abs_root_path(fname)
+                    if abs_fname in self.abs_fnames or abs_fname in self.abs_read_only_fnames:
+                        already.append(fname)
+                    elif os.path.exists(abs_fname):
+                        try:
+                            self.abs_fnames.add(abs_fname)
+                            self.check_added_files()
+                            added.append(fname)
+                            self.io.tool_output(f"[+] Auto-added existing file: {fname}")
+                        except Exception as e:
+                            self.io.tool_warning(f"Could not add {fname}: {e}")
+                    else:
+                        self.io.tool_warning(f"Requested file not found: {fname}")
+
+                # Remove the tag from the assistant message
+                last_msg["content"] = re.sub(
+                    r"<file_request>.*?</file_request>",
+                    "[File request processed]",
+                    last_msg["content"],
+                    flags=re.DOTALL,
                 )
-                self.reflected_message = (
-                    "[SYSTEM]: Requested files have been added to / dropped from "
-                    "the chat context. Please proceed with your analysis or code changes."
-                )
-                self.move_back_cur_messages("[SYSTEM]: Updated file context.")
-                return
+
+                # Give explicit feedback
+                if added:
+                    self.cur_messages.append(
+                        dict(role="user", content=f"[SYSTEM] Added to chat: {', '.join(added)}.")
+                    )
+                if already:
+                    self.cur_messages.append(
+                        dict(role="user",
+                             content=f"[SYSTEM] These files are already in the chat context and MUST NOT be requested again: {', '.join(already)}. Do not use <file_request> for them.")
+                    )
+                if not added and not already:
+                    self.cur_messages.append(
+                        dict(role="user",
+                             content=f"[SYSTEM] The requested files were not found: {', '.join(requested)}.")
+                    )
+
+        if file_request_found:
+            # Keep the loop alive with full context
+            self.reflected_message = "Proceed with your analysis or code changes based on the updated context."
+            return
 
         # --- FIX: AUTONOMOUS SHELL COMMAND EXTRACTION & ERROR BYPASS ---
         # 1. Extract commands from standard bash blocks even if the edit parser choked
