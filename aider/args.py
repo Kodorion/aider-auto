@@ -718,6 +718,15 @@ def get_parser(default_config_files, git_root):
         help="Specify the input device name for voice recording",
     )
 
+    ##########
+    group = parser.add_argument_group("Prompt settings")
+    group.add_argument(
+        "--auto-improve-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-improve user prompts before sending to LLM (default: True)",
+    )
+
     ######
     group = parser.add_argument_group("Other settings")
     group.add_argument(

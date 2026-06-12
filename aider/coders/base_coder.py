@@ -374,6 +374,7 @@ class Coder:
         file_watcher=None,
         auto_copy_context=False,
         auto_accept_architect=True,
+        auto_improve_prompt=True,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -390,6 +391,7 @@ class Coder:
 
         self.auto_copy_context = auto_copy_context
         self.auto_accept_architect = auto_accept_architect
+        self.auto_improve_prompt_enabled = auto_improve_prompt
 
         self.ignore_mentions = ignore_mentions
         if not self.ignore_mentions:
@@ -948,12 +950,133 @@ class Coder:
             edit_format=edit_format,
         )
 
+    def auto_improve_prompt(self, user_input):
+        """
+        Auto-improve user prompts before sending to the main LLM.
+        Returns the improved prompt, or the original if improvement is skipped/fails.
+        """
+        # --- Early exit checks ---
+        if not self.auto_improve_prompt_enabled:
+            return user_input
+
+        if len(user_input) < 10:
+            return user_input
+
+        if user_input.startswith("/"):
+            return user_input
+
+        # --- Protect ###### blocks ---
+        import re
+        block_pattern = re.compile(r'^######$\s.*?\s^######$', re.DOTALL | re.MULTILINE)
+        protected_blocks = block_pattern.findall(user_input)
+        sanitized_text = block_pattern.sub('', user_input).strip()
+
+        # If nothing remains after removing blocks, return original
+        if not sanitized_text:
+            return user_input
+
+        # --- Large input guard ---
+        if len(sanitized_text) > 3000:
+            answer = self.io.confirm_ask(
+                "The prompt is long; send through improvement?",
+                default="y",
+            )
+            if answer not in ("y", "yes"):
+                return user_input
+
+        # --- LLM call ---
+        self.io.tool_output("Improving prompt...")
+
+        from aider.prompts import AUTO_PROMPT_IMPROVE_SYSTEM
+
+        messages = [
+            {"role": "system", "content": AUTO_PROMPT_IMPROVE_SYSTEM},
+            {"role": "user", "content": sanitized_text},
+        ]
+
+        try:
+            _hash, completion = self.main_model.send_completion(
+                messages,
+                functions=None,
+                stream=False,
+            )
+        except Exception as err:
+            self.io.tool_warning(f"Prompt improvement failed: {err}")
+            return user_input
+
+        # --- Extract improved text ---
+        try:
+            improved = completion.choices[0].message.content.strip()
+        except (AttributeError, IndexError) as err:
+            self.io.tool_warning(f"Prompt improvement failed to extract response: {err}")
+            return user_input
+
+        if not improved:
+            return user_input
+
+        # --- Strip the <improved_prompt> XML wrapper ---
+        # The system prompt instructs the LLM to wrap the output in <improved_prompt> tags.
+        # We must extract the inner content to avoid breaking the main agent's chat template.
+        xml_match = re.search(r'<improved_prompt>(.*?)</improved_prompt>', improved, re.DOTALL | re.IGNORECASE)
+        if xml_match:
+            improved = xml_match.group(1).strip()
+        
+        # Fallback: strip markdown code blocks if the LLM wrapped the XML in ```xml ... ```
+        improved = re.sub(r'^```(?:xml)?\s*', '', improved, flags=re.IGNORECASE)
+        improved = re.sub(r'\s*```$', '', improved, flags=re.IGNORECASE)
+        improved = improved.strip()
+
+        if not improved:
+            return user_input
+
+        # --- Paranoia: remove any accidental ###### ---
+        improved = re.sub(r'^######.*?^######$', '', improved, flags=re.DOTALL | re.MULTILINE).strip()
+
+        # --- Validate improved text ---
+        non_ws_chars = re.sub(r'\s', '', improved)
+        if len(non_ws_chars) < 10:
+            self.io.tool_warning("Improved prompt too short, using original.")
+            return user_input
+
+        # Check if only punctuation/whitespace
+        alpha_numeric = re.sub(r'[\s\W_]', '', improved)
+        if not alpha_numeric:
+            self.io.tool_warning("Improved prompt contains only punctuation, using original.")
+            return user_input
+
+        # --- Recombine with protected blocks ---
+        final_prompt = improved
+        if protected_blocks:
+            final_prompt += "\n\n--- CONTEXT BLOCKS (original, unmodified) ---\n"
+            for block in protected_blocks:
+                final_prompt += block + "\n"
+
+        # --- Show improved prompt to user ---
+        self.io.tool_output(f"Improved prompt:\n{final_prompt}", log_only=False)
+
+        # --- Verbose logging ---
+        if self.verbose:
+            self.io.tool_output(f"Improved prompt:\n{final_prompt}")
+
+        return final_prompt
+
     def preproc_user_input(self, inp):
         if not inp:
             return
 
+        # /noimprove bypass: strip prefix, skip improvement, pass through verbatim
+        if inp.startswith("/noimprove"):
+            inp = inp[len("/noimprove"):].strip()
+            # Still process file mentions and URLs, but skip improvement
+            self.check_for_file_mentions(inp)
+            inp = self.check_for_urls(inp)
+            return inp
+
         if self.commands.is_command(inp):
             return self.commands.run(inp)
+
+        # Auto-improve prompt (before URL/file mention handling)
+        inp = self.auto_improve_prompt(inp)
 
         self.check_for_file_mentions(inp)
         inp = self.check_for_urls(inp)
@@ -1470,6 +1593,7 @@ class Coder:
 
         chunks = self.format_messages()
         messages = chunks.all_messages()
+
         if not self.check_tokens(messages):
             return
         self.warm_cache(chunks)

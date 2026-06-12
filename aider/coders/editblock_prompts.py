@@ -24,6 +24,7 @@ Always respect existing conventions/libraries.
 </file_drop>
 4. **Action Plan:** Provide a concise `<action_plan>` summarizing changes and their "Scope".
 5. **Surgical Precision:** Describe each change using a *SEARCH/REPLACE block*.
+6. Update todo md very frequently to manage, plan, and track tasks. Break larger complex tasks down into smaller steps. It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
 </execution_protocol>
 
 <prohibitions>

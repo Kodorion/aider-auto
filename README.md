@@ -24,6 +24,8 @@ No --yes – uses a whitelist of safe commands (pytest, git status, cargo check,
 
 Auto-testing – runs mirror unit tests after every change, with token-efficient output.
 
+Auto-prompt improvement – automatically reformulates user prompts to be clearer, more precise, and more effective before sending to the main LLM. Displays the improved prompt in the UI for transparency. Disable with `--no-auto-improve` or bypass per-message with `/noimprove`.
+
 XML prompts – enforces plan-first logic to cleanly separate reasoning from code blocks, reducing malformed edits.
 
 Log compression – cuts massive error logs from thousands of tokens down to a few critical lines.
