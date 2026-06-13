@@ -1,0 +1,7 @@
+feat(tcpe): add feature gating, error handling, and test suite
+
+- Add `tcpe_enabled` feature gate to disable TCPEngine safety checks by default.
+- Wrap all TCPEngine calls in editblock_coder with try/except fail-safes to prevent crashes.
+- Extend AST node type support to include Rust impl/trait items and modules.
+- Fix missing trailing newline in tcpe_engine.py.
+- Add comprehensive unit and integration test suite for TCPEngine (8 test modules).

@@ -41,7 +41,7 @@ class TCPEngine:
                 path.append(name_child.text.decode('utf-8', errors='ignore'))
             else:
                 # Fallback: check class/function structures if 'name' field is absent
-                if curr.type in ('class_definition', 'class_declaration', 'function_definition', 'struct_specifier'):
+                if curr.type in ('class_definition', 'class_declaration', 'function_definition', 'struct_specifier', 'impl_item', 'trait_item', 'module'):
                     for child in curr.children:
                         if child.type in ('identifier', 'type_identifier'):
                             path.append(child.text.decode('utf-8', errors='ignore'))

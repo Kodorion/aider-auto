@@ -380,6 +380,7 @@ class Coder:
         self.analytics = analytics if analytics is not None else Analytics()
 
         self.tcpe = TCPEngine(io)
+        self.tcpe_enabled = False  # Feature gate: set True to enable TCPEngine safety checks
         
         self.event = self.analytics.event
         self.chat_language = chat_language

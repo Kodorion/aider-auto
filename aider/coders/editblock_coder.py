@@ -54,7 +54,11 @@ class EditBlockCoder(Coder):
                 tcpe_error = "[SYSTEM LOG: Edit aborted. Your SEARCH block is exactly identical to your REPLACE block. You made absolutely zero changes to the code. You must write new/modified code in the REPLACE block to fix the failing tests.]"
                 failed.append((path, original, updated, tcpe_error))
                 if not dry_run:
-                    self.tcpe.track_failed_block(path, updated)
+                    if getattr(self, 'tcpe_enabled', False):
+                        try:
+                            self.tcpe.track_failed_block(path, updated)
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine error: {e}")
                 continue
             # ----------------------------------
 
@@ -63,9 +67,13 @@ class EditBlockCoder(Coder):
                 new_content = do_replace(full_path, content, original, updated, self.fence)
 
                 if new_content and not dry_run:
-                    is_safe, tcpe_error = self.tcpe.check_anti_doublon(new_content, path)
-                    if not is_safe:
-                        new_content = None
+                    if getattr(self, 'tcpe_enabled', False):
+                        try:
+                            is_safe, tcpe_error = self.tcpe.check_anti_doublon(new_content, path)
+                            if not is_safe:
+                                new_content = None
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine anti-doublon check error: {e}")
 
             # If the edit failed, and
             # this is not a "create a new file" with an empty original...
@@ -90,18 +98,34 @@ class EditBlockCoder(Coder):
 
             if new_content:
                 if not dry_run:
-                    modified_symbols = self.tcpe.extract_modified_symbols(path, content if content else "", new_content)
                     self.io.write_text(full_path, new_content)
-                    
-                    self.tcpe.process_successful_edit(path, updated)
-                    self.partial_response_content = self.tcpe.scrub_message(
-                        self.partial_response_content, path, modified_symbols, original, updated
-                    )
+
+                    if getattr(self, 'tcpe_enabled', False):
+                        try:
+                            modified_symbols = self.tcpe.extract_modified_symbols(path, content if content else "", new_content)
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine extract_modified_symbols error: {e}")
+                            modified_symbols = []
+                        try:
+                            self.tcpe.process_successful_edit(path, updated)
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine process_successful_edit error: {e}")
+                        try:
+                            self.partial_response_content = self.tcpe.scrub_message(
+                                self.partial_response_content, path, modified_symbols, original, updated
+                            )
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine scrub_message error: {e}")
+
                 passed.append(edit)
             else:
                 failed.append((path, original, updated, tcpe_error))
                 if not dry_run and not tcpe_error:
-                    self.tcpe.track_failed_block(path, updated)
+                    if getattr(self, 'tcpe_enabled', False):
+                        try:
+                            self.tcpe.track_failed_block(path, updated)
+                        except Exception as e:
+                            self.io.tool_warning(f"TCPEngine track_failed_block error: {e}")
 
         if dry_run:
             return updated_edits
