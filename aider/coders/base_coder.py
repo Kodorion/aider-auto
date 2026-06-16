@@ -995,14 +995,39 @@ class Coder:
             {"role": "user", "content": sanitized_text},
         ]
 
-        try:
-            _hash, completion = self.main_model.send_completion(
-                messages,
-                functions=None,
-                stream=False,
+        # DIAGNOSTIC GUARD: Verify payload size before sending
+        # If the user_input somehow captured the full chat history, this catches it.
+        payload_chars = sum(len(str(m)) for m in messages)
+        if payload_chars > 15000: 
+            self.io.tool_warning(
+                f"Prompt improvement payload abnormally large ({payload_chars} chars). "
+                "Bypassing to prevent full-context leak."
             )
+            return user_input
+
+        try:
+            # =========================================================================
+            # FIX: BYPASS self.main_model.send_completion TO PREVENT STATE LEAKAGE
+            # =========================================================================
+            # We call litellm directly to ensure NO internal wrapper logic or 
+            # proxy session tracking can append the main chat history.
+            kwargs = dict(self.main_model.extra_params) if self.main_model.extra_params else dict()
+            
+            # Enforce strict isolation parameters
+            kwargs["timeout"] = 30       # Hard 30s timeout to prevent indefinite hang
+            kwargs["num_retries"] = 0    # Disable LiteLLM internal retries
+            
+            completion = litellm.completion(
+                model=self.main_model.name,
+                messages=messages,       # Strictly the 2-message isolated array
+                stream=False,
+                **kwargs,
+            )
+            _hash = None  # Hash tracking is not critical for this isolated utility call
+            # =========================================================================
+            
         except Exception as err:
-            self.io.tool_warning(f"Prompt improvement failed: {err}")
+            self.io.tool_warning(f"Prompt improvement failed or timed out: {err}")
             return user_input
 
         # --- Extract improved text ---
@@ -1018,9 +1043,11 @@ class Coder:
         # --- Strip the <improved_prompt> XML wrapper ---
         # The system prompt instructs the LLM to wrap the output in <improved_prompt> tags.
         # We must extract the inner content to avoid breaking the main agent's chat template.
-        xml_match = re.search(r'<improved_prompt>(.*?)</improved_prompt>', improved, re.DOTALL | re.IGNORECASE)
-        if xml_match:
-            improved = xml_match.group(1).strip()
+        # Use findall() and take the LAST match to handle reasoning-enabled models that
+        # may emit draft <improved_prompt> blocks before their final output.
+        xml_matches = re.findall(r'<improved_prompt>(.*?)</improved_prompt>', improved, re.DOTALL | re.IGNORECASE)
+        if xml_matches:
+            improved = xml_matches[-1].strip()
         
         # Fallback: strip markdown code blocks if the LLM wrapped the XML in ```xml ... ```
         improved = re.sub(r'^```(?:xml)?\s*', '', improved, flags=re.IGNORECASE)

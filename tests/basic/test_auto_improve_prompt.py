@@ -30,6 +30,8 @@ def mock_io() -> MagicMock:
 def mock_main_model() -> MagicMock:
     """Provide a fresh mock main_model for each test."""
     model = MagicMock()
+    model.name = "gpt-4o"
+    model.extra_params = None
     model.send_completion = MagicMock()
     return model
 
@@ -126,14 +128,14 @@ def test_blocks_protected_and_appended(
     improved_text = "<task>Fix the issue</task>"
     completion = MagicMock()
     completion.choices[0].message.content = f"<improved_prompt>{improved_text}</improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(inp)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion) as mock_litellm:
+        result = coder.auto_improve_prompt(inp)
 
-    assert improved_text in result
-    assert "######\ncode block\n######" in result
-    assert "--- CONTEXT BLOCKS (original, unmodified) ---" in result
-    mock_main_model.send_completion.assert_called_once()
+        assert improved_text in result
+        assert "######\ncode block\n######" in result
+        assert "--- CONTEXT BLOCKS (original, unmodified) ---" in result
+        mock_litellm.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -150,14 +152,14 @@ def test_large_input_confirmation_yes(
     long_input = "x" * 3001
     completion = MagicMock()
     completion.choices[0].message.content = "<improved_prompt><task>Improved long prompt</task></improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
     mock_io.confirm_ask.return_value = "y"
 
-    result = coder.auto_improve_prompt(long_input)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion) as mock_litellm:
+        result = coder.auto_improve_prompt(long_input)
 
-    assert result == "<task>Improved long prompt</task>"
-    mock_io.confirm_ask.assert_called_once()
-    mock_main_model.send_completion.assert_called_once()
+        assert result == "<task>Improved long prompt</task>"
+        mock_io.confirm_ask.assert_called_once()
+        mock_litellm.assert_called_once()
 
 
 @pytest.mark.unit
@@ -186,17 +188,17 @@ def test_llm_exception_fallback(
     mock_io: MagicMock,
     mock_main_model: MagicMock,
 ) -> None:
-    """If send_completion raises, return original and log warning."""
+    """If litellm.completion raises, return original and log warning."""
     original = "normal prompt text here"
-    mock_main_model.send_completion.side_effect = Exception("API error")
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", side_effect=Exception("API error")):
+        result = coder.auto_improve_prompt(original)
 
-    assert result == original
-    mock_io.tool_warning.assert_called_once()
-    warning_call = mock_io.tool_warning.call_args[0][0]
-    assert "Prompt improvement failed" in warning_call
-    assert "API error" in warning_call
+        assert result == original
+        mock_io.tool_warning.assert_called_once()
+        warning_call = mock_io.tool_warning.call_args[0][0]
+        assert "Prompt improvement failed" in warning_call
+        assert "API error" in warning_call
 
 
 @pytest.mark.unit
@@ -208,11 +210,11 @@ def test_llm_empty_response_fallback(
     original = "normal prompt text here"
     completion = MagicMock()
     completion.choices[0].message.content = ""
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        result = coder.auto_improve_prompt(original)
 
-    assert result == original
+        assert result == original
 
 
 @pytest.mark.unit
@@ -225,12 +227,12 @@ def test_improved_too_short_fallback(
     original = "normal prompt text here"
     completion = MagicMock()
     completion.choices[0].message.content = "fix it"  # 6 non-ws chars
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        result = coder.auto_improve_prompt(original)
 
-    assert result == original
-    mock_io.tool_warning.assert_called_once()
+        assert result == original
+        mock_io.tool_warning.assert_called_once()
 
 
 @pytest.mark.unit
@@ -243,12 +245,12 @@ def test_improved_only_punctuation_fallback(
     original = "normal prompt text here"
     completion = MagicMock()
     completion.choices[0].message.content = "...!!?"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        result = coder.auto_improve_prompt(original)
 
-    assert result == original
-    mock_io.tool_warning.assert_called_once()
+        assert result == original
+        mock_io.tool_warning.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -265,12 +267,12 @@ def test_normal_prompt_improved_success(
     improved = "<task>Fix the bug in the code</task>"
     completion = MagicMock()
     completion.choices[0].message.content = f"<improved_prompt>{improved}</improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion) as mock_litellm:
+        result = coder.auto_improve_prompt(original)
 
-    assert result == improved
-    mock_main_model.send_completion.assert_called_once()
+        assert result == improved
+        mock_litellm.assert_called_once()
 
 
 @pytest.mark.unit
@@ -285,13 +287,13 @@ def test_verbose_logs_improved_prompt(
     improved = "<task>Improved</task>"
     completion = MagicMock()
     completion.choices[0].message.content = f"<improved_prompt>{improved}</improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        coder.auto_improve_prompt(original)
 
-    mock_io.tool_output.assert_called()
-    calls_str = " ".join(str(c) for c in mock_io.tool_output.call_args_list)
-    assert "Improved prompt:" in calls_str
+        mock_io.tool_output.assert_called()
+        calls_str = " ".join(str(c) for c in mock_io.tool_output.call_args_list)
+        assert "Improved prompt:" in calls_str
 
 
 # ---------------------------------------------------------------------------
@@ -344,22 +346,22 @@ def test_full_pipeline_improved_prompt_sent_to_main_llm(
     improved = "<task>Fix the bug in the code</task>"
     completion = MagicMock()
     completion.choices[0].message.content = f"<improved_prompt>{improved}</improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
     # Mock the downstream methods
-    with patch.object(coder, "check_for_file_mentions", return_value=None):
-        with patch.object(coder, "check_for_urls", return_value=improved):
-            result = coder.preproc_user_input(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion) as mock_litellm:
+        with patch.object(coder, "check_for_file_mentions", return_value=None):
+            with patch.object(coder, "check_for_urls", return_value=improved):
+                result = coder.preproc_user_input(original)
 
-            # Verify auto_improve_prompt was called and returned improved text
-            assert result == improved
-            mock_main_model.send_completion.assert_called_once()
+                # Verify auto_improve_prompt was called and returned improved text
+                assert result == improved
+                mock_litellm.assert_called_once()
 
-            # Verify the improved prompt (not original) was used
-            call_args = mock_main_model.send_completion.call_args
-            messages = call_args[0][0]
-            user_msg = messages[1]["content"]
-            assert user_msg == original  # The sanitized text sent to improve LLM
+                # Verify the improved prompt (not original) was used
+                call_args = mock_litellm.call_args
+                messages = call_args[1]["messages"]
+                user_msg = messages[1]["content"]
+                assert user_msg == original  # The sanitized text sent to improve LLM
 
 
 @pytest.mark.unit
@@ -402,11 +404,11 @@ def test_strips_markdown_wrapped_xml(
     mock_response = "```xml\n<improved_prompt><task>Fix the bug</task></improved_prompt>\n```"
     completion = MagicMock()
     completion.choices[0].message.content = mock_response
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        result = coder.auto_improve_prompt(original)
 
-    assert result == "<task>Fix the bug</task>"
+        assert result == "<task>Fix the bug</task>"
 
 
 @pytest.mark.unit
@@ -419,9 +421,9 @@ def test_handles_empty_xml_wrapper_fallback(
     original = "normal prompt text here"
     completion = MagicMock()
     completion.choices[0].message.content = "<improved_prompt></improved_prompt>"
-    mock_main_model.send_completion.return_value = ("hash", completion)
 
-    result = coder.auto_improve_prompt(original)
+    with patch("aider.coders.base_coder.litellm.completion", return_value=completion):
+        result = coder.auto_improve_prompt(original)
 
-    # Because the stripped result is empty, it should trigger the `if not improved:` fallback
-    assert result == original
+        # Because the stripped result is empty, it should trigger the `if not improved:` fallback
+        assert result == original

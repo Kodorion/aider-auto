@@ -1,7 +1,15 @@
-feat(tcpe): add feature gating, error handling, and test suite
+fix(coders): isolate auto-improve prompt LLM call to prevent context leakage
 
-- Add `tcpe_enabled` feature gate to disable TCPEngine safety checks by default.
-- Wrap all TCPEngine calls in editblock_coder with try/except fail-safes to prevent crashes.
-- Extend AST node type support to include Rust impl/trait items and modules.
-- Fix missing trailing newline in tcpe_engine.py.
-- Add comprehensive unit and integration test suite for TCPEngine (8 test modules).
+- Bypass self.main_model.send_completion() in auto_improve_prompt() to prevent
+  internal wrapper logic from appending main chat history to the isolated utility call.
+- Call litellm.completion() directly with strict isolation parameters (timeout=30s,
+  num_retries=0) to ensure only the 2-message improvement prompt is sent.
+- Add payload size diagnostic guard (>15000 chars) to catch and bypass abnormally
+  large inputs that may indicate full-context leakage.
+- Handle None extra_params safely when constructing kwargs for litellm.completion().
+- Use re.findall() to extract last <improved_prompt> match, handling reasoning-enabled
+  models that may emit draft blocks before final output.
+- Update AUTO_PROMPT_IMPROVE_SYSTEM prompt to specify Aider CLI environment and add
+  rule for replacing file add/drop directives with plain-text instructions.
+- Update unit tests to mock litellm.completion instead of send_completion, adding
+  required model.name and model.extra_params attributes to mock fixture.

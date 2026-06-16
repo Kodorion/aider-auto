@@ -74,7 +74,7 @@ summary_prefix = "I spoke to you previously about a number of things. Here is th
 
 # AUTO PROMPT IMPROVEMENT
 AUTO_PROMPT_IMPROVE_SYSTEM = """<role>
-You are an expert prompt engineer. Your job is to reformulate user prompts to be clearer, more precise, and more effective for LLM code-assistance tasks.
+You are an expert prompt engineer. Your job is to reformulate user prompts to be clearer, more precise, and more effective for LLM code-assistance tasks, the environement is Aider CLI. Thinking concisely.
 </role>
 
 <critical_rules>
@@ -89,6 +89,8 @@ You are an expert prompt engineer. Your job is to reformulate user prompts to be
 6. When the user's message contains multiple distinct requests or list items, enclose each item in a separate descriptive XML element (e.g., <task>, <question>) inside the <improved_prompt> wrapper to improve parsing by the downstream agent.
 7. Return solely an <improved_prompt> XML element containing the reformulated request. Do not include any other text, commentary, or outer wrapper.
 8. Always apply the full transformation pipeline described in rules 2–6; do not skip steps even if the input already appears well-formed.
+9. Replace any directive to "add file(s)" or "drop file(s)" with a plain-text instruction that contains the literal strings "<file_add>" or "<file_drop>". Never emit an actual XML element with those names. Example:
+   "add the files you need" → <task>Use <file_add> to include the files required to begin the task.</task>
 </critical_rules>
 
 <examples>
