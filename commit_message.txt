@@ -1,15 +1,11 @@
-fix(coders): isolate auto-improve prompt LLM call to prevent context leakage
+fix: improve robustness of auto-improve prompt XML tag extraction
 
-- Bypass self.main_model.send_completion() in auto_improve_prompt() to prevent
-  internal wrapper logic from appending main chat history to the isolated utility call.
-- Call litellm.completion() directly with strict isolation parameters (timeout=30s,
-  num_retries=0) to ensure only the 2-message improvement prompt is sent.
-- Add payload size diagnostic guard (>15000 chars) to catch and bypass abnormally
-  large inputs that may indicate full-context leakage.
-- Handle None extra_params safely when constructing kwargs for litellm.completion().
-- Use re.findall() to extract last <improved_prompt> match, handling reasoning-enabled
-  models that may emit draft blocks before final output.
-- Update AUTO_PROMPT_IMPROVE_SYSTEM prompt to specify Aider CLI environment and add
-  rule for replacing file add/drop directives with plain-text instructions.
-- Update unit tests to mock litellm.completion instead of send_completion, adding
-  required model.name and model.extra_params attributes to mock fixture.
+Handle cases where LLMs output reasoning mixed with the final answer,
+potentially emitting multiple <improved_prompt> tags or failing to close
+the tag entirely.
+
+- Use re.findall() and take the last match to prefer the final polished
+  version when multiple <improved_prompt> blocks are present.
+- Add fallback to extract text after the last <improved_prompt> open tag
+  when no closing tag is found, preventing malformed output from leaking
+  reasoning text into the main chat context.

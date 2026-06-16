@@ -1048,6 +1048,13 @@ class Coder:
         xml_matches = re.findall(r'<improved_prompt>(.*?)</improved_prompt>', improved, re.DOTALL | re.IGNORECASE)
         if xml_matches:
             improved = xml_matches[-1].strip()
+        else:
+            # Fallback: Handle missing closing tag by extracting text after the LAST <improved_prompt> tag.
+            # This addresses cases where the LLM outputs reasoning mixed with the answer and fails to close the tag.
+            open_tag_matches = list(re.finditer(r'<improved_prompt>', improved, re.IGNORECASE))
+            if open_tag_matches:
+                last_open_tag = open_tag_matches[-1]
+                improved = improved[last_open_tag.end():].strip()
         
         # Fallback: strip markdown code blocks if the LLM wrapped the XML in ```xml ... ```
         improved = re.sub(r'^```(?:xml)?\s*', '', improved, flags=re.IGNORECASE)
