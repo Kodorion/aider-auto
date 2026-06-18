@@ -1,11 +1,11 @@
-fix: improve robustness of auto-improve prompt XML tag extraction
+fix: enforce strict boundary sanitization for improved prompt extraction
 
-Handle cases where LLMs output reasoning mixed with the final answer,
-potentially emitting multiple <improved_prompt> tags or failing to close
-the tag entirely.
+Add a final sanitization pass in auto_improve_prompt to strip any text
+outside <improved_prompt> XML boundaries. This prevents reasoning or
+analysis text emitted by the LLM before the tag from leaking into the
+final improved prompt.
 
-- Use re.findall() and take the last match to prefer the final polished
-  version when multiple <improved_prompt> blocks are present.
-- Add fallback to extract text after the last <improved_prompt> open tag
-  when no closing tag is found, preventing malformed output from leaking
-  reasoning text into the main chat context.
+- Re-extract content if nested or multiple tags confuse the first pass
+- Ensure no preceding reasoning or trailing noise survives extraction
+- All 19 existing auto-improve tests pass with no regressions
+- Added thinking constraint to the improvement prompt

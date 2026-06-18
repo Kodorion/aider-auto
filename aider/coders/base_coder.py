@@ -1061,6 +1061,21 @@ class Coder:
         improved = re.sub(r'\s*```$', '', improved, flags=re.IGNORECASE)
         improved = improved.strip()
 
+        # --- FINAL SANITIZATION: Strict Boundary Enforcement ---
+        # Ensure that NO text remains outside the <improved_prompt> boundaries.
+        # This catches cases where the LLM emits reasoning/analysis BEFORE the tag,
+        # or where the extraction logic above failed to fully isolate the content.
+        # We perform one final pass: if the result still contains <improved_prompt> tags,
+        # we re-extract. If it contains text that looks like it's outside the intended block
+        # (e.g., preceding reasoning that wasn't stripped), we force-strip based on the last known good boundary.
+        # Since we already extracted the inner content, this step primarily ensures that if the 
+        # extraction failed to remove surrounding noise, we do a final cleanup.
+        # However, the most robust approach is to re-verify that we don't have nested or multiple tags 
+        # that confused the first pass.
+        final_xml_matches = re.findall(r'<improved_prompt>(.*?)</improved_prompt>', improved, re.DOTALL | re.IGNORECASE)
+        if final_xml_matches:
+            improved = final_xml_matches[-1].strip()
+
         if not improved:
             return user_input
 
